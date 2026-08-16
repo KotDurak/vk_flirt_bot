@@ -1,0 +1,63 @@
+from functools import lru_cache
+import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    group_token: str
+    group_id: int
+    api_version: str = "5.199"
+    log_level: str = "INFO"
+    longpoll_wait: int = 25,
+    db_path: str = "data/bot.db"
+    llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
+
+    model_config = SettingsConfigDict(
+        env_prefix="VK_BOT_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """
+    Возвращает настройки приложения.
+
+    Переменные окружения читаются с префиксом VK_BOT_:
+    - VK_BOT_GROUP_TOKEN
+    - VK_BOT_GROUP_ID
+    - VK_BOT_API_VERSION
+    - VK_BOT_LOG_LEVEL
+    - VK_BOT_LONGPOLL_WAIT
+    """
+    return Settings()
+
+# app/config.py
+
+# ... (импорты и класс Settings остаются)
+
+class LLMSettings(BaseSettings):
+    api_key: str
+    base_url: str = "https://api.polza.ai/v1"
+    model: str = "Sao10K: Llama 3.3 Euryale 70B"
+    max_tokens: int = 800
+    temperature: float = 0.85
+    llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
+
+    model_config = SettingsConfigDict(
+        env_prefix="LLM_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+# ... (в конец файла)
+
+@lru_cache
+def get_llm_settings() -> LLMSettings:
+    """Возвращает настройки LLM."""
+    return LLMSettings()
