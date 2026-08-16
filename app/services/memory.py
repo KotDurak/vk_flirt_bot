@@ -11,9 +11,9 @@ import re
 logger = logging.getLogger(__name__)
 
 # === НАСТРОЙКИ ПАМЯТИ ===
-HISTORY_WINDOW = 20
-SUMMARY_TRIGGER = 25
-SUMMARY_KEEP_LAST = 10
+HISTORY_WINDOW = 8          # ⬇️ Было 20 → Стало 8 (оптимум)
+SUMMARY_TRIGGER = 20        # ⬇️ Было 25 → Стало 20 (чаще суммаризируем)
+SUMMARY_KEEP_LAST = 8       # ⬇️ Было 10 → Стало 8 (синхронизируем с HIST
 
 SUMMARY_SYSTEM_PROMPT = """Ты — ассистент, который сжимает историю диалога в краткое резюме.
 Твоя задача: сохранить ключевые факты из беседы — имена, предпочтения, важные события, 

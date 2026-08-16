@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 from typing import Any
-
+import random
 from app.services.chat_queue import ChatTask
 from app.services.llm import create_llm_client
 from app.services.memory import maybe_generate_summary, build_llm_context
@@ -59,7 +59,13 @@ async def process_chat_task(
         await msg_repo.add_message(
             task.user_id, task.char_id, "user", "(начал общение)"
         )
-    answer = "Что-то у меня заискрило... Напиши ещё разочек? 🥺"
+
+    ERROR_MESSAGES = [
+        "Ой, я немного задумалась... Попробуй написать ещё раз? 😊",
+        "Хм, что-то меня отвлекло. Повтори, пожалуйста?",
+        "Прости, я на секунду потеряла мысль. Что ты говорил?",
+    ]
+    answer = random.choice(ERROR_MESSAGES)
 
     try:
         # 1. Возможно, генерируем summary

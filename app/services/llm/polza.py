@@ -50,8 +50,10 @@ class LLMPolza(LLMBase):
             "messages": messages,
             "max_tokens": self._settings.max_tokens,
             "temperature": self._settings.temperature,
-            "frequency_penalty": 0.3,
-            "presence_penalty": 0.6,
+            "frequency_penalty": 0.45,
+            "presence_penalty": 0.4,
+            "top_p": 0.95,
+            "repetition_penalty": 1.12,
         }
 
         for attempt in range(max_retries):
