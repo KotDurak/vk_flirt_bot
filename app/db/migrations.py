@@ -11,14 +11,23 @@ async def run_migrations(db: Database) -> None:
 
     logger.info("Running database migrations...")
 
+    # === ТАБЛИЦА ПОЛЬЗОВАТЕЛЕЙ ===
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             vk_user_id INTEGER NOT NULL UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_premium BOOLEAN DEFAULT FALSE
+            is_premium BOOLEAN DEFAULT FALSE,
+            messages INTEGER DEFAULT 80
         );
     """)
+
+    # Добавляем поле messages, если его нет (для существующих БД)
+    try:
+        await conn.execute("ALTER TABLE users ADD COLUMN messages INTEGER DEFAULT 10")
+        logger.info("Added 'messages' column to users table")
+    except Exception:
+        pass  # Колонка уже существует
 
     # Индексы для быстрого поиска
     await conn.execute("""
@@ -29,7 +38,7 @@ async def run_migrations(db: Database) -> None:
     await conn.execute("""
             CREATE TABLE IF NOT EXISTS characters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                slug TEXT,                          -- <-- добавили
+                slug TEXT,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL,
                 photo_attachment TEXT,
@@ -81,15 +90,40 @@ async def run_migrations(db: Database) -> None:
            );
        """)
 
+    # === ТАБЛИЦА ПЛАТЕЖЕЙ ===
+    await conn.execute("""
+           CREATE TABLE IF NOT EXISTS payments (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id INTEGER NOT NULL,
+               invoice_id TEXT NOT NULL UNIQUE,
+               amount INTEGER NOT NULL,
+               messages INTEGER NOT NULL,
+               status TEXT DEFAULT 'pending',
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               paid_at TIMESTAMP,
+               FOREIGN KEY (user_id) REFERENCES users(id)
+           );
+       """)
+
     # Индексы для быстрого доступа
     await conn.execute("""
            CREATE INDEX IF NOT EXISTS idx_messages_user_char 
            ON messages(user_id, character_id, id);
        """)
-    
+
     await conn.execute("""
            CREATE INDEX IF NOT EXISTS idx_summary_user_char 
            ON conversation_summary(user_id, character_id);
+       """)
+
+    await conn.execute("""
+           CREATE INDEX IF NOT EXISTS idx_payments_invoice 
+           ON payments(invoice_id);
+       """)
+
+    await conn.execute("""
+           CREATE INDEX IF NOT EXISTS idx_payments_user_status 
+           ON payments(user_id, status);
        """)
 
     await conn.commit()

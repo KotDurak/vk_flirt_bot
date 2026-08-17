@@ -1,4 +1,3 @@
-# app/handlers/messages.py
 from __future__ import annotations
 
 import json
@@ -14,6 +13,8 @@ from app.db.repositories.users import UserRepository
 from app.db.repositories.characters import CharacterRepository
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.summaries import SummaryRepository
+from app.db.repositories.payments import PaymentRepository
+from app.services.payments.base import PaymentProvider
 from app.services.memory import maybe_generate_summary, build_llm_context
 from app.services.chat_queue import ChatTask
 
@@ -37,7 +38,6 @@ def _clean_response(text: str) -> str:
     """Убирает английские вставки и мета-текст из ответа LLM."""
     import re
 
-    # Словарь замен английских слов на русские
     replacements = {
         r'\bhandsome\b': 'красавчик',
         r'\bbaby\b': 'малыш',
@@ -57,24 +57,31 @@ def _clean_response(text: str) -> str:
     for pattern, replacement in replacements.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
-    # Убираем примечания в скобках (модель иногда пишет мета-текст)
     text = re.sub(r'\([^)]*Примечание[^)]*\)', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\([^)]*Note[^)]*\)', '', text, flags=re.IGNORECASE)
-
-    # Убираем лишние пробелы
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
+
 
 def get_main_menu_keyboard() -> str:
     """Главное меню бота."""
     kb = KeyboardBuilder(one_time=False)
     kb.add_button("👤 Выбрать персонажа", payload={"cmd": "chars"}, color="primary")
     kb.row()
+    kb.add_button("⚡ Купить энергию", payload={"cmd": "buy"}, color="positive")
+    kb.row()
+    kb.add_button("📊 Мой профиль", payload={"cmd": "profile"}, color="secondary")
     kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
+    kb.row()
     kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
     return kb.to_json()
 
+def get_dialog_keyboard() -> str:
+    """Клавиатура во время активного диалога (без кнопки 'Начать общение')."""
+    kb = KeyboardBuilder(one_time=False)
+    kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
+    return kb.to_json()
 
 def get_characters_keyboard(characters: list[dict]) -> str:
     """Создает клавиатуру со списком персонажей."""
@@ -87,7 +94,6 @@ def get_characters_keyboard(characters: list[dict]) -> str:
         )
         kb.row()
 
-    # Кнопка назад в главное меню
     kb.add_button("⬅️ В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
@@ -102,6 +108,32 @@ def get_character_actions_keyboard(char_id: int) -> str:
     return kb.to_json()
 
 
+def get_payment_keyboard() -> str:
+    """Меню покупки энергии."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+    kb.add_button("50 энергии (50₽)", payload={"cmd": "buy_package", "energy": 50, "amount": 50}, color="primary")
+    kb.row()
+    kb.add_button("200 энергии (150₽)", payload={"cmd": "buy_package", "energy": 200, "amount": 150}, color="primary")
+    kb.row()
+    kb.add_button("500 энергии (300₽)", payload={"cmd": "buy_package", "energy": 500, "amount": 300}, color="primary")
+    kb.row()
+    kb.add_button("⬅️ В главное меню", payload={"cmd": "start"}, color="secondary")
+    return kb.to_json()
+
+
+def get_check_payment_keyboard(invoice_id: str) -> str:
+    """Кнопка для проверки статуса платежа."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+    kb.add_button(
+        "✅ Я оплатил, проверить",
+        payload={"cmd": "check_payment", "invoice_id": invoice_id},
+        color="positive"
+    )
+    kb.row()
+    kb.add_button("⬅️ В главное меню", payload={"cmd": "start"}, color="secondary")
+    return kb.to_json()
+
+
 async def handle_update(
         update: dict[str, Any],
         api: VKApi,
@@ -111,6 +143,8 @@ async def handle_update(
         char_repo: CharacterRepository,
         msg_repo: MessageRepository,
         summary_repo: SummaryRepository,
+        payment_repo: PaymentRepository,
+        payment_provider: PaymentProvider,
         event_cache: EventCache,
         chat_queue,
 ) -> None:
@@ -161,13 +195,15 @@ async def handle_update(
 
     answer = ""
     send_keyboard = None
-    attachment = None  # <-- Для фото персонажа
+    attachment = None
 
     # === ГЛАВНОЕ МЕНЮ ===
     if text_lower == "начать" or cmd == "start":
+        balance = await payment_repo.get_user_balance(user["id"])
         answer = (
-            "Привет! 👋 Я твой виртуальный компаньон для общения.\n"
-            "Выбери, что хочешь сделать, с помощью кнопок ниже!"
+            f"Привет! 👋 Я твой виртуальный компаньон для общения.\n\n"
+            f"⚡ У тебя осталось {balance} энергии\n\n"
+            f"Выбери, что хочешь сделать, с помощью кнопок ниже!"
         )
         send_keyboard = get_main_menu_keyboard()
 
@@ -190,13 +226,9 @@ async def handle_update(
             answer = "Персонаж не найден 😿"
             send_keyboard = get_main_menu_keyboard()
         else:
-            # Сохраняем выбор пользователя
             await char_repo.set_user_character(user["id"], character["id"])
-
-            # === НОВОЕ: Очищаем историю и summary для нового персонажа ===
             await msg_repo.clear_history(user["id"], character["id"])
             await summary_repo.clear_summary(user["id"], character["id"])
-            # =============================================================
 
             answer = (
                 f"✨ {character['name']}\n\n"
@@ -208,11 +240,31 @@ async def handle_update(
             if character.get("photo_attachment"):
                 attachment = character["photo_attachment"]
 
+    # === ПРОФИЛЬ И СТАТИСТИКА ===
+    elif cmd == "profile":
+        balance = await payment_repo.get_user_balance(user["id"])
+        stats = await payment_repo.get_user_stats(user["id"])
+        current_char = await char_repo.get_user_character(user["id"])
+
+        char_name = current_char["name"] if current_char else "не выбран"
+
+        answer = (
+            f"📊 Твой профиль\n\n"
+            f"⚡ Энергия: {balance}\n"
+            f"💬 Всего сообщений: {stats['total_messages']}\n"
+            f"💰 Всего куплено энергии: {stats['total_energy_bought']}\n"
+            f"🎭 Текущий персонаж: {char_name}\n"
+            f"📅 Ты с нами с: {user.get('created_at', 'неизвестно')}\n\n"
+            f"Продолжай общение, чтобы узнать больше! 😉"
+        )
+        send_keyboard = get_main_menu_keyboard()
+
     # === СПРАВКА ===
     elif text_lower in ("/help", "помощь") or cmd == "help":
         answer = (
             "ℹ️ Справка:\n\n"
             "Просто пиши мне сообщения, и мы будем болтать!\n"
+            "Каждое сообщение тратит 1 энергию ⚡\n"
             "Ты можешь выбрать персонажа, сбросить нашу историю или вызвать это меню.\n\n"
             "Команды:\n"
             "/start - Главное меню\n"
@@ -223,7 +275,6 @@ async def handle_update(
 
     # === СБРОС ===
     elif text_lower in ("/reset", "сброс", "сбросить") or cmd == "reset":
-        # Очищаем историю и summary для текущего персонажа
         current_char = await char_repo.get_user_character(user["id"])
         if current_char:
             await msg_repo.clear_history(user["id"], current_char["id"])
@@ -235,6 +286,86 @@ async def handle_update(
             answer = "🔄 Вся история сброшена! Начнем всё с чистого листа? 😉"
         send_keyboard = get_main_menu_keyboard()
 
+    # === ПОКУПКА ЭНЕРГИИ ===
+    elif cmd == "buy":
+        balance = await payment_repo.get_user_balance(user["id"])
+        answer = (
+            f"⚡ Магазин энергии\n\n"
+            f"Текущий баланс: {balance} энергии\n\n"
+            f"Выбери пакет:"
+        )
+        send_keyboard = get_payment_keyboard()
+
+    # === СОЗДАНИЕ ИНВОЙСА ===
+    elif cmd == "buy_package":
+        energy = payload.get("energy")
+        amount = payload.get("amount")
+
+        result = await payment_provider.create_invoice(
+            user_id=user["id"],
+            amount=amount,
+            messages=energy,  # Передаём как messages (в БД поле называется messages)
+        )
+
+        if result.success:
+            await payment_repo.create_payment(
+                user_id=user["id"],
+                invoice_id=result.invoice_id,
+                amount=amount,
+                messages=energy,
+            )
+
+            answer = (
+                f"💳 Оплата {amount}₽ за {energy} энергии\n\n"
+                f"1. Перейди по ссылке для оплаты\n"
+                f"2. Выбери удобный способ оплаты\n"
+                f"3. После оплаты нажми кнопку 'Проверить'\n\n"
+                f"Ссылка на оплату:\n{result.payment_url}"
+            )
+            send_keyboard = get_check_payment_keyboard(result.invoice_id)
+        else:
+            answer = f"❌ Ошибка создания платежа: {result.error_message}"
+            send_keyboard = get_payment_keyboard()
+
+    # === ПРОВЕРКА СТАТУСА ПЛАТЕЖА ===
+    elif cmd == "check_payment":
+        invoice_id = payload.get("invoice_id")
+
+        payment = await payment_repo.get_payment_by_invoice(invoice_id)
+
+        if not payment:
+            answer = "❌ Платёж не найден"
+            send_keyboard = get_main_menu_keyboard()
+        elif payment["status"] == "paid":
+            answer = "✅ Этот платёж уже обработан!"
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            status = await payment_provider.check_status(invoice_id)
+
+            if status.is_paid:
+                await payment_repo.mark_as_paid(invoice_id)
+                await payment_repo.add_user_messages(
+                    user_id=user["id"],
+                    messages=payment["messages"]
+                )
+
+                new_balance = await payment_repo.get_user_balance(user["id"])
+
+                answer = (
+                    f"🎉 Оплата получена!\n\n"
+                    f"⚡ Начислено {payment['messages']} энергии\n"
+                    f"💬 Текущий баланс: {new_balance} энергии\n\n"
+                    f"Можешь продолжать общение!"
+                )
+                send_keyboard = get_main_menu_keyboard()
+            else:
+                answer = (
+                    f"⏳ Платёж ещё не обработан\n\n"
+                    f"Если ты уже оплатил, подожди 1-2 минуты и нажми 'Проверить' снова.\n\n"
+                    f"Статус: {status.status}"
+                )
+                send_keyboard = get_check_payment_keyboard(invoice_id)
+
     # === ОБЫЧНЫЙ ДИАЛОГ С ПЕРСОНАЖЕМ ===
     else:
         if cmd == "chat":
@@ -243,7 +374,36 @@ async def handle_update(
                 answer = "Сначала выбери персонажа! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                # Кидаем в очередь стартовую задачу — персонаж сам поздоровается
+                # 🆕 Проверяем, не начат ли уже диалог (есть ли сообщения в истории)
+                existing_messages = await msg_repo.get_recent_history(
+                    user["id"], current_char["id"], limit=1
+                )
+                if existing_messages:
+                    # Диалог уже начат, игнорируем кнопку
+                    logger.info("⏭️ Dialog already started for user %s, ignoring", user["id"])
+                    return
+
+                balance = await payment_repo.get_user_balance(user["id"])
+                if balance <= 0:
+                    answer = (
+                        "😿 У тебя закончилась энергия!\n\n"
+                        "Купи новый пакет, чтобы продолжить общение:"
+                    )
+                    send_keyboard = get_payment_keyboard()
+                    await api.send_message(
+                        peer_id=int(peer_id),
+                        text=answer,
+                        keyboard=send_keyboard,
+                    )
+                    return
+
+                # 🆕 СРАЗУ убираем клавиатуру
+                await api.send_message(
+                    peer_id=int(peer_id),
+                    text="⏳",
+                    keyboard='{"buttons": []}',
+                )
+
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=current_char["id"],
@@ -251,14 +411,14 @@ async def handle_update(
                     text="[Начало диалога. Поздоровайся с пользователем и задай тон сцене.]",
                     user_dict=user,
                     char_dict=current_char,
+                    keyboard=get_dialog_keyboard(),
                 ))
-                # Ответ отправит воркер, тут выходим
                 return
-        # 🆕 Фильтруем служебные сообщения (кнопки)
+
         if payload.get("cmd") or text.startswith("💬") or text.startswith("👤"):
             logger.info("⏭️ Skipping service/payload message: %s", text[:50])
-            # Можно отправить меню или игнорировать
             return
+
         if not text:
             answer = "Напиши мне что-нибудь, я умею не только молчать 😉"
             send_keyboard = get_main_menu_keyboard()
@@ -269,12 +429,24 @@ async def handle_update(
                 answer = "Сначала выбери персонажа, с которым хочешь пообщаться! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
+                balance = await payment_repo.get_user_balance(user["id"])
+                if balance <= 0:
+                    answer = (
+                        "😿 У тебя закончилась энергия!\n\n"
+                        "Купи новый пакет, чтобы продолжить общение:"
+                    )
+                    send_keyboard = get_payment_keyboard()
+                    await api.send_message(
+                        peer_id=int(peer_id),
+                        text=answer,
+                        keyboard=send_keyboard,
+                    )
+                    return
+
                 char_id = current_char["id"]
 
-                # 1. Сохраняем сообщение пользователя
                 await msg_repo.add_message(user["id"], char_id, "user", text)
 
-                # 2. Кидаем задачу в очередь
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=char_id,
@@ -283,8 +455,6 @@ async def handle_update(
                     user_dict=user,
                     char_dict=current_char,
                 ))
-
-                # Ответ отправит воркер, тут выходим
                 return
 
     await api.send_message(

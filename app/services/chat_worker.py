@@ -8,6 +8,7 @@ import random
 from app.services.chat_queue import ChatTask
 from app.services.llm import create_llm_client
 from app.services.memory import maybe_generate_summary, build_llm_context
+from app.db.repositories.payments import PaymentRepository  # ← НОВОЕ
 from app.vk.api import VKApi
 
 logger = logging.getLogger(__name__)
@@ -38,24 +39,32 @@ def _clean_response(text: str) -> str:
 
 
 async def process_chat_task(
-    task: ChatTask,
-    api: VKApi,
-    session: Any,
-    msg_repo: Any,
-    summary_repo: Any,
+        task: ChatTask,
+        api: VKApi,
+        session: Any,
+        msg_repo: Any,
+        summary_repo: Any,
+        payment_repo: PaymentRepository,
 ) -> None:
     logger.info("🎯 START task: user=%s char=%s text='%s'",
                 task.user_id, task.char_id, task.text[:50])
 
-    # 🆕 Создаём клиент через фабрику
-    llm = create_llm_client(session)
-
-    # 🆕 Проверяем, стартовое ли это сообщение
     is_start_message = task.text.startswith("[Начало диалога")
 
-    # Сохраняем в историю: либо реальный текст, либо маркер начала
+    # Проверка баланса перед генерацией
+    if not is_start_message:
+        balance = await payment_repo.get_user_balance(task.user_id)
+        if balance <= 0:
+            logger.warning("⚠️ User %s has no messages left", task.user_id)
+            await api.send_message(
+                peer_id=task.peer_id,
+                text="😿 У тебя закончились сообщения! Купи новый пакет в главном меню."
+            )
+            return
+
+    llm = create_llm_client(session)
+
     if is_start_message:
-        # Сохраняем нейтральное сообщение от пользователя
         await msg_repo.add_message(
             task.user_id, task.char_id, "user", "(начал общение)"
         )
@@ -65,45 +74,37 @@ async def process_chat_task(
         "Хм, что-то меня отвлекло. Повтори, пожалуйста?",
         "Прости, я на секунду потеряла мысль. Что ты говорил?",
     ]
+
     answer = random.choice(ERROR_MESSAGES)
+    is_real_answer = False  # ← ФЛАГ: был ли реальный ответ от LLM
 
     try:
-        # 1. Возможно, генерируем summary
         await maybe_generate_summary(
-            session=session,
-            llm=llm,
-            msg_repo=msg_repo,
-            summary_repo=summary_repo,
-            user_id=task.user_id,
-            character_id=task.char_id,
+            session=session, llm=llm,
+            msg_repo=msg_repo, summary_repo=summary_repo,
+            user_id=task.user_id, character_id=task.char_id,
         )
 
-        # Пауза между запросами (защита от 429)
         await asyncio.sleep(1.0)
 
-        # 2. Собираем контекст
         messages = await build_llm_context(
-            msg_repo=msg_repo,
-            summary_repo=summary_repo,
-            user_id=task.user_id,
-            character_id=task.char_id,
+            msg_repo=msg_repo, summary_repo=summary_repo,
+            user_id=task.user_id, character_id=task.char_id,
             system_prompt=task.char_dict["system_prompt"],
         )
 
-        # 3. Логируем последние 3 сообщения (для диагностики зацикливания)
         logger.info("📜 Last 3 messages in context:")
         for msg in messages[-3:]:
             logger.info("   [%s] %s", msg["role"], msg.get("content", "")[:100])
 
-        # 4. Запрос к LLM
         result = await llm.generate(messages)
 
         if result.success:
             answer = _clean_response(result.content)
             answer = _truncate(answer)
+            is_real_answer = True  # ← Реальный ответ получен
             logger.info("✅ Answer: '%s'", answer[:100])
 
-            # Сохраняем успешный ответ в историю
             await msg_repo.add_message(
                 task.user_id, task.char_id, "assistant", answer
             )
@@ -112,16 +113,35 @@ async def process_chat_task(
                 "❌ LLM failed: code=%s msg=%s",
                 result.error_code, result.error_message
             )
-            # answer уже содержит дефолтное сообщение об ошибке
-            # ВАЖНО: НЕ сохраняем ошибку в историю (чтобы не ломать RP)
+            # answer остаётся заглушкой, is_real_answer = False
+            # НЕ сохраняем заглушку в историю (чтобы не ломать RP)
 
     except Exception:
         logger.exception("💥 CRITICAL error in chat worker")
-        # answer уже содержит дефолтное сообщение
+        # answer остаётся заглушкой, is_real_answer = False
 
-    # 5. Всегда отправляем что-то пользователю
+    # Отправляем ответ пользователю
     try:
-        await api.send_message(peer_id=task.peer_id, text=answer)
+        # 🆕 Используем клавиатуру из задачи, если она передана
+        await api.send_message(
+            peer_id=task.peer_id,
+            text=answer,
+            keyboard=task.keyboard,
+        )
+
+        # Списываем одно сообщение после успешной отправки
+        if not is_start_message and is_real_answer:
+            success = await payment_repo.use_message(task.user_id)
+            if success:
+                new_balance = await payment_repo.get_user_balance(task.user_id)
+                logger.info("💰 Energy used. User %s balance: %d",
+                            task.user_id, new_balance)
+            else:
+                logger.warning("⚠️ Failed to use energy for user %s", task.user_id)
+        elif not is_start_message and not is_real_answer:
+            logger.info("💰 Energy NOT charged (LLM failed). User %s can retry",
+                        task.user_id)
+
     except Exception:
         logger.exception("Failed to send message to user %s", task.user_id)
 

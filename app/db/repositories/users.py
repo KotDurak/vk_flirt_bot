@@ -13,34 +13,42 @@ class UserRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    # app/db/repositories/users.py
+
     async def get_or_create(self, vk_user_id: int) -> dict:
-        """
-        Ищет пользователя по VK ID.
-        Если не находит - создает нового и возвращает его.
-        """
+        """Получает или создаёт пользователя."""
         conn = self.db.connection
 
-        # 1. Пытаемся найти
         cursor = await conn.execute(
-            "SELECT id, vk_user_id, is_premium FROM users WHERE vk_user_id = ?",
-            (vk_user_id,)
+            "SELECT id, vk_user_id,created_at,is_premium,messages FROM users WHERE vk_user_id = ?", (vk_user_id,)
         )
         row = await cursor.fetchone()
 
         if row:
-            # dict(row) превращает aiosqlite.Row в обычный словарь
-            return dict(row)
+            return {
+                "id": row[0],
+                "vk_user_id": row[1],
+                "created_at": row[2],
+                "is_premium": row[3],
+                "messages": row[4],
+            }
 
-        # 2. Если не нашли - создаем
-        logger.info("Creating new user for vk_id=%s", vk_user_id)
-        cursor = await conn.execute(
-            "INSERT INTO users (vk_user_id) VALUES (?)",
-            (vk_user_id,)
+        # Создаём нового пользователя
+        await conn.execute(
+            "INSERT INTO users (vk_user_id, messages) VALUES (?, 80)",
+            (vk_user_id,),
         )
         await conn.commit()
 
+        cursor = await conn.execute(
+            "SELECT * FROM users WHERE vk_user_id = ?", (vk_user_id,)
+        )
+        row = await cursor.fetchone()
+
         return {
-            "id": cursor.lastrowid,
-            "vk_user_id": vk_user_id,
-            "is_premium": False
+            "id": row[0],
+            "vk_user_id": row[1],
+            "created_at": row[2],
+            "is_premium": row[3],
+            "messages": row[4],
         }

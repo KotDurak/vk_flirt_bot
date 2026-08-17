@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     longpoll_wait: int = 25,
     db_path: str = "data/bot.db"
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
+    payment_provider: str = "test"
 
     model_config = SettingsConfigDict(
         env_prefix="VK_BOT_",
@@ -46,6 +47,7 @@ class LLMSettings(BaseSettings):
     max_tokens: int = 800
     temperature: float = 1.2
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
+    model_summary: str = "sao10k/l3-lunaris-8b"
 
     model_config = SettingsConfigDict(
         env_prefix="LLM_",

@@ -7,6 +7,7 @@ from app.db.repositories.summaries import SummaryRepository
 from app.config import get_llm_settings
 from app.services.llm import create_llm_client
 import re
+import copy
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +69,8 @@ async def maybe_generate_summary(
     ]
 
     # === СОЗДАЁМ ОТДЕЛЬНЫЙ КЛИЕНТ ДЛЯ SUMMARY (дешёвая модель) ===
-    summary_settings = get_llm_settings()
-    summary_settings.model = "sao10k/l3-lunaris-8b"  # ✅ Lunaris для русского
+    summary_settings = copy.deepcopy(get_llm_settings())
+    summary_settings.model = summary_settings.model_summary
     summary_settings.max_tokens = 800
 
     summary_llm = create_llm_client(session)
