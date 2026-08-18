@@ -11,16 +11,19 @@ import copy
 
 logger = logging.getLogger(__name__)
 
-# === НАСТРОЙКИ ПАМЯТИ ===
-HISTORY_WINDOW = 8          # ⬇️ Было 20 → Стало 8 (оптимум)
-SUMMARY_TRIGGER = 20        # ⬇️ Было 25 → Стало 20 (чаще суммаризируем)
-SUMMARY_KEEP_LAST = 8       # ⬇️ Было 10 → Стало 8 (синхронизируем с HIST
+# === 🆕 НАСТРОЙКИ ПАМЯТИ (Оптимизированы против зацикливания) ===
+HISTORY_WINDOW = 12  # ⬆️ Было 8 → Стало 12 (разбавляем паттерны большим контекстом)
+SUMMARY_TRIGGER = 12  # ⬇️ Было 20 → Стало 12 (суммаризируем чаще, чтобы не копился мусор)
+SUMMARY_KEEP_LAST = 10  # ⬆️ Было 8 → Стало 10 (оставляем чуть больше контекста после чистки)
 
-SUMMARY_SYSTEM_PROMPT = """Ты — ассистент, который сжимает историю диалога в краткое резюме.
-Твоя задача: сохранить ключевые факты из беседы — имена, предпочтения, важные события, 
-договоренности, эмоциональный тон и особенности отношений между собеседниками.
-Не добавляй новых фактов, которых не было в диалоге.
-Пиши на русском языке, кратко, в формате связного текста (до 150 слов)."""
+# === 🆕 ОБНОВЛЕННЫЙ ПРОМПТ ДЛЯ SUMMARY ===
+SUMMARY_SYSTEM_PROMPT = """Ты — ассистент, который обновляет краткое резюме диалога.
+Твоя задача:
+1. Сохрани ключевые факты из предыдущего резюме (если оно есть).
+2. Добавь новые факты из последних сообщений.
+3. ВАЖНО: Не повторяй формулировки и структуры из предыдущего резюме. Перефразируй, используй другие слова и глаголы.
+4. Избегай шаблонных фраз вроде "пользователь спросил", "персонаж ответил". Пиши живо и разнообразно.
+5. Пиши на русском языке, кратко, в формате связного текста (до 150-200 слов)."""
 
 
 async def maybe_generate_summary(
@@ -76,10 +79,8 @@ async def maybe_generate_summary(
     summary_llm = create_llm_client(session)
     summary_llm._settings = summary_settings
 
-    # ✅ ИСПРАВЛЕНО: вызываем summary_llm, а не llm
     result = await summary_llm.generate(messages)
 
-    # ✅ ИСПРАВЛЕНО: проверяем LLMResult, а не строку
     if not result.success:
         logger.warning(
             "Failed to generate summary: error_code=%s msg=%s",
@@ -98,13 +99,12 @@ async def maybe_generate_summary(
             "⚠️ Summary is in English! Rejecting. Latin: %d, Cyrillic: %d",
             latin_chars, cyrillic_chars
         )
-        return  # Не сохраняем английский summary
+        return
 
     if not new_summary:
         logger.warning("LLM returned empty summary")
         return
 
-    # Определяем ID последнего сообщения
     last_message_id = messages_for_summary[-1]["id"]
 
     await summary_repo.save_summary(
@@ -112,17 +112,13 @@ async def maybe_generate_summary(
         new_summary, last_message_id
     )
 
-    # 🆕 УДАЛЯЕМ старые сообщения из БД (кроме последних SUMMARY_KEEP_LAST)
-    # Находим ID сообщения, до которого нужно удалить
+    # 🆕 УДАЛЯЕМ старые сообщения из БД
     keep_messages = await msg_repo.get_recent_history(
         user_id, character_id,
         limit=SUMMARY_KEEP_LAST
     )
     if keep_messages:
-        # keep_messages отсортированы по возрастанию ID (после reversed в репозитории)
-        # Берём ID самого старого из оставляемых
         cutoff_id = keep_messages[0]["id"]
-
         await msg_repo.delete_old_messages(
             user_id, character_id,
             before_message_id=cutoff_id
@@ -131,11 +127,6 @@ async def maybe_generate_summary(
             "Deleted old messages before id=%d for user=%d char=%d",
             cutoff_id, user_id, character_id
         )
-
-    logger.info(
-        "Summary updated for user_id=%d, character_id=%d, up to message_id=%d",
-        user_id, character_id, last_message_id
-    )
 
     logger.info(
         "Summary updated for user_id=%d, character_id=%d, up to message_id=%d",
@@ -167,23 +158,37 @@ async def build_llm_context(
     history = await msg_repo.get_recent_history(
         user_id, character_id,
         limit=HISTORY_WINDOW,
-        after_message_id=last_summarized_id  # <-- НОВОЕ
+        after_message_id=last_summarized_id
     )
 
-    # Дедупликация (уже было)
+    # 🆕 ИСПРАВЛЕННАЯ ДЕДУПЛИКАЦИЯ (сравниваем только роль и текст, игнорируя id)
     deduplicated = []
     for msg in history:
-        if deduplicated and deduplicated[-1] == msg:
+        if not deduplicated:
+            deduplicated.append(msg)
             continue
+
+        last_msg = deduplicated[-1]
+        if last_msg.get("role") == msg.get("role") and last_msg.get("content") == msg.get("content"):
+            continue  # Пропускаем дубликат
+
         deduplicated.append(msg)
 
-    # Защита от переполнения (уже было)
-    MAX_HISTORY_CHARS = 16000
+    # 🆕 ПРОВЕРКА НА ДЕГРАДАЦИЮ (Вызов функций, которые были внизу файла)
+    is_degraded, warning = _check_history_degradation(deduplicated)
+    if is_degraded:
+        system_content += warning
+        # Аварийная обрезка: оставляем только последние 4 сообщения, чтобы "выбить" паттерн
+        deduplicated = deduplicated[-4:]
+        logger.warning("🔄 History trimmed to last 4 messages due to degradation detected")
+
+    # Защита от переполнения
+    MAX_HISTORY_CHARS = 32000  # 🆕 Увеличили лимит, чтобы не обрезало полезные сообщения
     current_chars = len(system_content)
     trimmed_history = []
 
     for msg in reversed(deduplicated):
-        msg_len = len(msg.get("content", ""))
+        msg_len = len(str(msg.get("content", "")))  # str() на случай None
         if current_chars + msg_len > MAX_HISTORY_CHARS:
             break
         trimmed_history.insert(0, msg)
@@ -191,3 +196,85 @@ async def build_llm_context(
 
     messages.extend(trimmed_history)
     return messages
+
+
+# ==========================================
+# 🆕 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЗАЩИТЫ ОТ ЦИКЛОВ
+# ==========================================
+
+def _calculate_similarity(text1: str, text2: str) -> float:
+    """Простая проверка похожести по общим словам (Jaccard)."""
+    words1 = set(text1.lower().split())
+    words2 = set(text2.lower().split())
+    if not words1 or not words2:
+        return 0.0
+    intersection = words1 & words2
+    union = words1 | words2
+    return len(intersection) / len(union)
+
+
+def _check_structural_similarity(text1: str, text2: str) -> float:
+    """Проверяет структурное сходство (одинаковые фразы в начале/конце)."""
+    # Берем первые 30 и последние 30 символов
+    prefix1 = text1[:30].lower().strip()
+    prefix2 = text2[:30].lower().strip()
+    suffix1 = text1[-30:].lower().strip()
+    suffix2 = text2[-30:].lower().strip()
+
+    # Проверяем, начинаются ли ответы одинаково
+    prefix_match = prefix1 == prefix2
+
+    # Проверяем, заканчиваются ли ответы одинаково
+    suffix_match = suffix1 == suffix2
+
+    # Если и начало, и конец одинаковые — это структурный повтор
+    if prefix_match and suffix_match:
+        return 1.0
+    elif prefix_match or suffix_match:
+        return 0.7
+
+    return 0.0
+
+
+def _check_history_degradation(deduplicated: list[dict]) -> tuple[bool, str]:
+    """Проверяет, не скатилась ли история в паттерн."""
+    assistant_msgs = [m for m in deduplicated if m.get("role") == "assistant"]
+
+    if len(assistant_msgs) < 3:
+        return False, ""
+
+    # Берём последние 3 ответа ассистента
+    last_3 = assistant_msgs[-3:]
+
+    # Проверяем попарное сходство (и по словам, и по структуре)
+    word_similarities = [
+        _calculate_similarity(last_3[0]["content"], last_3[1]["content"]),
+        _calculate_similarity(last_3[1]["content"], last_3[2]["content"]),
+        _calculate_similarity(last_3[0]["content"], last_3[2]["content"]),
+    ]
+
+    structural_similarities = [
+        _check_structural_similarity(last_3[0]["content"], last_3[1]["content"]),
+        _check_structural_similarity(last_3[1]["content"], last_3[2]["content"]),
+        _check_structural_similarity(last_3[0]["content"], last_3[2]["content"]),
+    ]
+
+    avg_word_sim = sum(word_similarities) / len(word_similarities)
+    avg_struct_sim = sum(structural_similarities) / len(structural_similarities)
+
+    # Если средняя похожесть по словам > 0.5 ИЛИ структурная > 0.7 — это деградация
+    if avg_word_sim > 0.5 or avg_struct_sim > 0.7:
+        logger.warning(
+            "🚨 Degradation detected! Word similarity: %.2f, Structural: %.2f",
+            avg_word_sim, avg_struct_sim
+        )
+        return True, (
+            "\n\n[СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ СИСТЕМЫ]\n"
+            "Твои последние ответы стали слишком похожи друг на друга по структуре.\n"
+            "НЕМЕДЛЕННО кардинально смени стиль, структуру и действия.\n"
+            "Если собеседник задал вопрос — ОБЯЗАНА ответить на него напрямую.\n"
+            "Не используй фразы '*улыбаясь* Ох, *смеюсь*' или '**Прижимаюсь к тебе**' — они повторяются слишком часто.\n"
+            "Начни ответ с действия, которого ещё не было в этом диалоге."
+        )
+
+    return False, ""
