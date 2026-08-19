@@ -47,7 +47,7 @@ class LLMSettings(BaseSettings):
     max_tokens: int = 800
     temperature: float = 1.2
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
-    model_summary: str = "sao10k/l3-lunaris-8b"
+    model_summary: str = "sao10k/l3.3-euryale-70b"
 
     model_config = SettingsConfigDict(
         env_prefix="LLM_",

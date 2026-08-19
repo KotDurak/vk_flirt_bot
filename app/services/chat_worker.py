@@ -66,7 +66,7 @@ async def process_chat_task(
 
     if is_start_message:
         await msg_repo.add_message(
-            task.user_id, task.char_id, "user", "(начал общение)"
+            task.user_id, task.char_id, "user", "Привет"
         )
 
     ERROR_MESSAGES = [

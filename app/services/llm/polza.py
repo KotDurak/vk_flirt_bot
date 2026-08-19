@@ -53,7 +53,6 @@ class LLMPolza(LLMBase):
             "frequency_penalty": 0.45,
             "presence_penalty": 0.4,
             "top_p": 0.95,
-            "repetition_penalty": 1.12,
         }
 
         for attempt in range(max_retries):

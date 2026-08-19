@@ -6,8 +6,9 @@ from app.db.repositories.messages import MessageRepository
 from app.db.repositories.summaries import SummaryRepository
 from app.config import get_llm_settings
 from app.services.llm import create_llm_client
-import re
 import copy
+import re
+from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +18,28 @@ SUMMARY_TRIGGER = 12  # ⬇️ Было 20 → Стало 12 (суммаризи
 SUMMARY_KEEP_LAST = 10  # ⬆️ Было 8 → Стало 10 (оставляем чуть больше контекста после чистки)
 
 # === 🆕 ОБНОВЛЕННЫЙ ПРОМПТ ДЛЯ SUMMARY ===
-SUMMARY_SYSTEM_PROMPT = """Ты — ассистент, который обновляет краткое резюме диалога.
-Твоя задача:
-1. Сохрани ключевые факты из предыдущего резюме (если оно есть).
-2. Добавь новые факты из последних сообщений.
-3. ВАЖНО: Не повторяй формулировки и структуры из предыдущего резюме. Перефразируй, используй другие слова и глаголы.
-4. Избегай шаблонных фраз вроде "пользователь спросил", "персонаж ответил". Пиши живо и разнообразно.
-5. Пиши на русском языке, кратко, в формате связного текста (до 150-200 слов)."""
+SUMMARY_SYSTEM_PROMPT = """Ты — сухой, беспристрастный архивариус. Твоя задача — обновить фактологическое резюме диалога.
+
+СТРОГИЕ ПРАВИЛА:
+1. ИМЕНА: Используй ТОЛЬКО имена, которые явно указаны в диалоге. Если имя не упомянуто — НЕ выдумывай его. Используй "собеседник", "мужчина", "женщина" или описательные термины ("продавец", "девушка в красном").
+2. СТРУКТУРА (строго следуй этому порядку):
+   - ТЕКУЩАЯ ЛОКАЦИЯ: [Где они находятся прямо сейчас. Укажи, публичное это место или частное].
+   - ТЕКУЩЕЕ ДЕЙСТВИЕ: [Что происходит ИМЕННО В ПОСЛЕДНЕМ сообщении, физический факт].
+   - НЕДАВНИЕ СОБЫТИЯ: [1-2 факта о том, что было до этого, в хронологическом порядке].
+3. СТИЛЬ: Телеграфный, протокольный, как сухой отчет.
+4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+   - Копировать фразы или имена из этого промпта. Анализируй именно предоставленный диалог.
+   - Выдумывать имена, если они не указаны в диалоге.
+   - Описывать эмоции, атмосферу, чувства. Только факты.
+   - Использовать метафоры, эпитеты или художественные обороты.
+   - Писать от первого лица ("мы", "я"). Пиши в третьем лице.
+5. ОБЪЕМ: Максимум 3-4 коротких предложения.
+
+ПРИМЕР ИДЕАЛЬНОГО РЕЗЮМЕ (для понимания формата, не копируй содержание!):
+"ТЕКУЩАЯ ЛОКАЦИЯ: Городской парк на скамейке (публичное место).
+ТЕКУЩЕЕ ДЕЙСТВИЕ: Девушка кормит уток, собеседник читает книгу.
+НЕДАВНИЕ СОБЫТИЯ: Они встретились после работы, купили хлеб и пошли к пруду."
+"""
 
 
 async def maybe_generate_summary(
@@ -202,79 +218,49 @@ async def build_llm_context(
 # 🆕 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЗАЩИТЫ ОТ ЦИКЛОВ
 # ==========================================
 
-def _calculate_similarity(text1: str, text2: str) -> float:
-    """Простая проверка похожести по общим словам (Jaccard)."""
-    words1 = set(text1.lower().split())
-    words2 = set(text2.lower().split())
-    if not words1 or not words2:
-        return 0.0
-    intersection = words1 & words2
-    union = words1 | words2
-    return len(intersection) / len(union)
-
-
-def _check_structural_similarity(text1: str, text2: str) -> float:
-    """Проверяет структурное сходство (одинаковые фразы в начале/конце)."""
-    # Берем первые 30 и последние 30 символов
-    prefix1 = text1[:30].lower().strip()
-    prefix2 = text2[:30].lower().strip()
-    suffix1 = text1[-30:].lower().strip()
-    suffix2 = text2[-30:].lower().strip()
-
-    # Проверяем, начинаются ли ответы одинаково
-    prefix_match = prefix1 == prefix2
-
-    # Проверяем, заканчиваются ли ответы одинаково
-    suffix_match = suffix1 == suffix2
-
-    # Если и начало, и конец одинаковые — это структурный повтор
-    if prefix_match and suffix_match:
-        return 1.0
-    elif prefix_match or suffix_match:
-        return 0.7
-
-    return 0.0
-
-
 def _check_history_degradation(deduplicated: list[dict]) -> tuple[bool, str]:
-    """Проверяет, не скатилась ли история в паттерн."""
+    """
+    Проверяет на опасное зацикливание, сравнивая два последних ответа ассистента.
+    Использует SequenceMatcher для выявления смысловых повторов и проверяет overlap действий.
+    """
     assistant_msgs = [m for m in deduplicated if m.get("role") == "assistant"]
 
-    if len(assistant_msgs) < 3:
+    # Нам нужно минимум 2 сообщения для сравнения
+    if len(assistant_msgs) < 2:
         return False, ""
 
-    # Берём последние 3 ответа ассистента
-    last_3 = assistant_msgs[-3:]
+    last_msg = assistant_msgs[-1]["content"]
+    prev_msg = assistant_msgs[-2]["content"]
 
-    # Проверяем попарное сходство (и по словам, и по структуре)
-    word_similarities = [
-        _calculate_similarity(last_3[0]["content"], last_3[1]["content"]),
-        _calculate_similarity(last_3[1]["content"], last_3[2]["content"]),
-        _calculate_similarity(last_3[0]["content"], last_3[2]["content"]),
-    ]
+    # 1. Проверка общей текстовой схожести (SequenceMatcher лучше Jaccard для парафразинга)
+    text_similarity = SequenceMatcher(None, last_msg, prev_msg).ratio()
 
-    structural_similarities = [
-        _check_structural_similarity(last_3[0]["content"], last_3[1]["content"]),
-        _check_structural_similarity(last_3[1]["content"], last_3[2]["content"]),
-        _check_structural_similarity(last_3[0]["content"], last_3[2]["content"]),
-    ]
+    # 2. Проверка повторения действий в звездочках (самая частая причина циклов в RP)
+    actions_last = set(re.findall(r'\*+(.*?)\*+', last_msg.lower()))
+    actions_prev = set(re.findall(r'\*+(.*?)\*+', prev_msg.lower()))
 
-    avg_word_sim = sum(word_similarities) / len(word_similarities)
-    avg_struct_sim = sum(structural_similarities) / len(structural_similarities)
+    if not actions_last or not actions_prev:
+        action_overlap = 0.0
+    else:
+        action_overlap = len(actions_last & actions_prev) / max(len(actions_last), len(actions_prev))
 
-    # Если средняя похожесть по словам > 0.5 ИЛИ структурная > 0.7 — это деградация
-    if avg_word_sim > 0.5 or avg_struct_sim > 0.7:
+    # 🚨 ПОРОГОВЫЕ ЗНАЧЕНИЯ: Если текст похож > 65% ИЛИ действия повторяются > 50%
+    if text_similarity > 0.65 or action_overlap > 0.5:
         logger.warning(
-            "🚨 Degradation detected! Word similarity: %.2f, Structural: %.2f",
-            avg_word_sim, avg_struct_sim
+            f"🚨 CRITICAL LOOP DETECTED! Text sim: {text_similarity:.2f}, Action overlap: {action_overlap:.2f}"
         )
-        return True, (
-            "\n\n[СРОЧНОЕ ПРЕДУПРЕЖДЕНИЕ СИСТЕМЫ]\n"
-            "Твои последние ответы стали слишком похожи друг на друга по структуре.\n"
-            "НЕМЕДЛЕННО кардинально смени стиль, структуру и действия.\n"
-            "Если собеседник задал вопрос — ОБЯЗАНА ответить на него напрямую.\n"
-            "Не используй фразы '*улыбаясь* Ох, *смеюсь*' или '**Прижимаюсь к тебе**' — они повторяются слишком часто.\n"
-            "Начни ответ с действия, которого ещё не было в этом диалоге."
+
+        # АБСТРАКТНОЕ предупреждение. Никаких конкретных слов типа "улыбается"!
+        warning_text = (
+            "\n\n[ПРЕДУПРЕЖДЕНИЕ СИСТЕМЫ: ОБНАРУЖЕНО ПОВТОРЕНИЕ]\n"
+            "Твои последние ответы слишком похожи по структуре и смыслу. Ты используешь одни и те же паттерны.\n"
+            "ПРАВИЛО: Оставайся в рамках текущей темы и сцены, но РАЗВИВАЙ её, а не повторяй.\n"
+            "Сделай одно из следующего:\n"
+            "1. Углуби текущую мысль: задай уточняющий вопрос по теме разговора или вырази более конкретное мнение о ней.\n"
+            "2. Добавь органичную микро-деталь: конкретное движение, соответствующее текущей позе (поправить воротник, перенести вес, изменить выражение взгляда), но НЕ используй жесты из предыдущего ответа.\n"
+            "3. Свяжи текущий разговор с конкретной сенсорной деталью окружения (запах, текстура, конкретный предмет рядом).\n"
+            "Запрещено резко менять тему или вводить неуместные внешние факторы. Ответь естественно и по-новому."
         )
+        return True, warning_text
 
     return False, ""
