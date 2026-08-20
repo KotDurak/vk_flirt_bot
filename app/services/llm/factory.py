@@ -30,6 +30,11 @@ def create_llm_client(session: aiohttp.ClientSession) -> LLMBase:
         logger.info("🏭 Creating LLMPolza client")
         return LLMPolza(session)
 
+    elif provider == "vsegpt":
+        from app.services.llm.vsegpt import LLMVseGPT
+        logger.info("🏭 Creating LLMVseGPT client (Qwen/EVA ready)")
+        return LLMVseGPT(session)
+
     # Здесь можно добавить другие провайдеры:
     # elif provider == "yandex":
     #     from app.services.llm.yandex import LLMYandex

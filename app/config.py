@@ -45,7 +45,7 @@ class LLMSettings(BaseSettings):
     base_url: str = "https://api.polza.ai/v1"
     model: str = "Sao10K: Llama 3.3 Euryale 70B"
     max_tokens: int = 800
-    temperature: float = 1.2
+    temperature: float = 1.1
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
     model_summary: str = "sao10k/l3.3-euryale-70b"
 
