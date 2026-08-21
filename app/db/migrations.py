@@ -126,5 +126,11 @@ async def run_migrations(db: Database) -> None:
            ON payments(user_id, status);
        """)
 
+    try:
+        await conn.execute("ALTER TABLE characters ADD COLUMN greeting_message TEXT")
+        logger.info("Added 'greeting_message' column to characters table")
+    except Exception:
+        pass  # Колонка уже существует, всё ок
+
     await conn.commit()
     logger.info("Migrations completed successfully")

@@ -374,41 +374,49 @@ async def handle_update(
                 answer = "Сначала выбери персонажа! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                # 🆕 Проверяем, не начат ли уже диалог (есть ли сообщения в истории)
+                # 1. Проверяем, не начат ли уже диалог
                 existing_messages = await msg_repo.get_recent_history(
                     user["id"], current_char["id"], limit=1
                 )
                 if existing_messages:
-                    # Диалог уже начат, игнорируем кнопку
                     logger.info("⏭️ Dialog already started for user %s, ignoring", user["id"])
                     return
 
-                balance = await payment_repo.get_user_balance(user["id"])
-                if balance <= 0:
-                    answer = (
-                        "😿 У тебя закончилась энергия!\n\n"
-                        "Купи новый пакет, чтобы продолжить общение:"
-                    )
-                    send_keyboard = get_payment_keyboard()
+                # 2. Пытаемся взять готовое приветствие из БД
+                greeting = current_char.get("greeting_message")
+
+                if greeting:
+                    # ВАРИАНТ А (Идеальный): Отправляем готовый текст. Быстро, бесплатно, без галлюцинаций.
+                    await msg_repo.add_message(user["id"], current_char["id"], "assistant", greeting)
                     await api.send_message(
                         peer_id=int(peer_id),
-                        text=answer,
-                        keyboard=send_keyboard,
+                        text=greeting,
+                        keyboard=get_dialog_keyboard(),
                     )
+                    logger.info("✅ Sent predefined greeting for user %s", user["id"])
+                    return  # Завершаем, LLM не нужен
+
+                # ВАРИАНТ Б (Fallback): Если в БД нет greeting, используем твою рабочую очередь, но с жестким промптом
+                balance = await payment_repo.get_user_balance(user["id"])
+                if balance <= 0:
+                    answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить общение:"
+                    send_keyboard = get_payment_keyboard()
+                    await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
 
-                # 🆕 СРАЗУ убираем клавиатуру
+                # Показываем индикатор загрузки
                 await api.send_message(
                     peer_id=int(peer_id),
                     text="⏳",
                     keyboard='{"buttons": []}',
                 )
 
+                # Отправляем в очередь с ЖЕСТКИМ запретом на выдумывание сценариев
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=current_char["id"],
                     peer_id=int(peer_id),
-                    text="[Начало диалога. Поздоровайся с пользователем и задай тон сцене.]",
+                    text="[СИСТЕМНАЯ КОМАНДА: Сгенерируй САМОЕ ПЕРВОЕ сообщение диалога. Обстановка: простая и повседневная (парк, скамейка, кафе). Ты занята своими делами. Твоя реакция на появление пользователя: холодная, ленивая, с легким скепсисом. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать вечеринки, драки или сложные сценарии. Формат: 1-2 коротких абзаца, действия в *звездочках*, речь с тире.]",
                     user_dict=user,
                     char_dict=current_char,
                     keyboard=get_dialog_keyboard(),

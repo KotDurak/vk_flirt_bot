@@ -64,11 +64,6 @@ async def process_chat_task(
 
     llm = create_llm_client(session)
 
-    if is_start_message:
-        await msg_repo.add_message(
-            task.user_id, task.char_id, "user", "Привет"
-        )
-
     ERROR_MESSAGES = [
         "Ой, я немного задумалась... Попробуй написать ещё раз? 😊",
         "Хм, что-то меня отвлекло. Повтори, пожалуйста?",
