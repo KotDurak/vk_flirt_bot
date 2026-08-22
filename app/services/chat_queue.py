@@ -18,9 +18,10 @@ class ChatTask:
     user_dict: dict  # чтобы не искать заново
     char_dict: dict  # чтобы не искать заново
     # Приоритет: 0 = обычный, 1 = премиум (обрабатывается первым)
-    priority: int = 0,
+    priority: int = 0
     keyboard: str | None = None
-
+    is_regeneration: bool = False
+    model_name: str = None
 
 class ChatQueue:
     """

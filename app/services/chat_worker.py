@@ -8,7 +8,7 @@ import random
 from app.services.chat_queue import ChatTask
 from app.services.llm import create_llm_client
 from app.services.memory import maybe_generate_summary, build_llm_context
-from app.db.repositories.payments import PaymentRepository  # ← НОВОЕ
+from app.db.repositories.payments import PaymentRepository
 from app.vk.api import VKApi
 
 logger = logging.getLogger(__name__)
@@ -49,10 +49,13 @@ async def process_chat_task(
     logger.info("🎯 START task: user=%s char=%s text='%s'",
                 task.user_id, task.char_id, task.text[:50])
 
-    is_start_message = task.text.startswith("[Начало диалога")
+    is_start_message = task.text.startswith("[Начало диалога") or task.text.startswith("[СИСТЕМНАЯ КОМАНДА")
 
-    # Проверка баланса перед генерацией
-    if not is_start_message:
+    # 🆕 ПРОВЕРКА: является ли эта задача регенерацией
+    is_regeneration = getattr(task, 'is_regeneration', False)
+
+    # Проверка баланса перед генерацией (ПРОПУСКАЕМ, если это регенерация, т.к. уже проверили и списали в handle_update)
+    if not is_start_message and not is_regeneration:
         balance = await payment_repo.get_user_balance(task.user_id)
         if balance <= 0:
             logger.warning("⚠️ User %s has no messages left", task.user_id)
@@ -78,6 +81,7 @@ async def process_chat_task(
             session=session, llm=llm,
             msg_repo=msg_repo, summary_repo=summary_repo,
             user_id=task.user_id, character_id=task.char_id,
+            model_override=getattr(task, 'model_name', None)
         )
 
         await asyncio.sleep(1.0)
@@ -92,7 +96,7 @@ async def process_chat_task(
         for msg in messages[-3:]:
             logger.info("   [%s] %s", msg["role"], msg.get("content", "")[:100])
 
-        result = await llm.generate(messages)
+        result = await llm.generate(messages, model_override=getattr(task, 'model_name', None))
 
         if result.success:
             answer = _clean_response(result.content)
@@ -108,34 +112,32 @@ async def process_chat_task(
                 "❌ LLM failed: code=%s msg=%s",
                 result.error_code, result.error_message
             )
-            # answer остаётся заглушкой, is_real_answer = False
-            # НЕ сохраняем заглушку в историю (чтобы не ломать RP)
 
     except Exception:
         logger.exception("💥 CRITICAL error in chat worker")
-        # answer остаётся заглушкой, is_real_answer = False
 
     # Отправляем ответ пользователю
     try:
-        # 🆕 Используем клавиатуру из задачи, если она передана
         await api.send_message(
             peer_id=task.peer_id,
             text=answer,
-            keyboard=task.keyboard,
+            keyboard=getattr(task, 'keyboard', None),  # Используем клавиатуру из задачи
         )
 
-        # Списываем одно сообщение после успешной отправки
-        if not is_start_message and is_real_answer:
+        # 🆕 Списываем сообщение ТОЛЬКО если это не старт и НЕ регенерация
+        if not is_start_message and is_real_answer and not is_regeneration:
             success = await payment_repo.use_message(task.user_id)
             if success:
                 new_balance = await payment_repo.get_user_balance(task.user_id)
-                logger.info("💰 Energy used. User %s balance: %d",
-                            task.user_id, new_balance)
+                logger.info("💰 Energy used. User %s balance: %d", task.user_id, new_balance)
             else:
                 logger.warning("⚠️ Failed to use energy for user %s", task.user_id)
-        elif not is_start_message and not is_real_answer:
-            logger.info("💰 Energy NOT charged (LLM failed). User %s can retry",
-                        task.user_id)
+
+        elif not is_start_message and not is_real_answer and not is_regeneration:
+            logger.info("💰 Energy NOT charged (LLM failed). User %s can retry", task.user_id)
+
+        elif is_regeneration and is_real_answer:
+            logger.info("♻️ Regeneration completed successfully. Energy was already deducted in handle_update.")
 
     except Exception:
         logger.exception("Failed to send message to user %s", task.user_id)

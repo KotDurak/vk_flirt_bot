@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     group_id: int
     api_version: str = "5.199"
     log_level: str = "INFO"
-    longpoll_wait: int = 25,
+    longpoll_wait: int = 25
     db_path: str = "data/bot.db"
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
     payment_provider: str = "test"
@@ -43,7 +43,8 @@ def get_settings() -> Settings:
 class LLMSettings(BaseSettings):
     api_key: str
     base_url: str = "https://api.polza.ai/v1"
-    model: str = "Sao10K: Llama 3.3 Euryale 70B"
+    model: str = "thedrummer/skyfall-36b-v2"
+    model_sfw: str = "meta-llama/llama-3.1-70b-instruct"
     max_tokens: int = 800
     temperature: float = 1.1
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
@@ -57,7 +58,6 @@ class LLMSettings(BaseSettings):
         extra="ignore",
     )
 
-# ... (в конец файла)
 
 @lru_cache
 def get_llm_settings() -> LLMSettings:

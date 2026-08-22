@@ -32,10 +32,12 @@ class LLMPolza(LLMBase):
             self,
             messages: list[dict[str, str]],
             max_retries: int = 2,
+            model_override: str | None = None
     ) -> LLMResult:
+        target_model = model_override or self._settings.model
         logger.info(
             "🚀 Polza request: model=%s, msgs=%d, tokens≈%d",
-            self._settings.model,
+            target_model,
             len(messages),
             self._count_tokens_approx(messages)
         )
@@ -46,13 +48,14 @@ class LLMPolza(LLMBase):
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self._settings.model,
+            "model": target_model,
             "messages": messages,
             "max_tokens": self._settings.max_tokens,
             "temperature": self._settings.temperature,
             "frequency_penalty": 1.1,
             "presence_penalty": 0.5,
             "top_p": 0.85,
+            "stop": ["P.S", "@id", "(*", "User:"]
         }
 
         for attempt in range(max_retries):

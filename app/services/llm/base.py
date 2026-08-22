@@ -34,6 +34,7 @@ class LLMBase(ABC):
             self,
             messages: list[dict[str, str]],
             max_retries: int = 2,
+            model_override: str | None = None
     ) -> LLMResult:
         """
         Генерирует ответ на основе списка сообщений.
@@ -42,6 +43,7 @@ class LLMBase(ABC):
             messages: Список сообщений в формате OpenAI
                      [{"role": "system", "content": "..."}, ...]
             max_retries: Максимальное количество попыток при ошибках
+            model_override: Модель для генерации
 
         Returns:
             LLMResult с результатом генерации

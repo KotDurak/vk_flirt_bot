@@ -40,6 +40,7 @@ async def maybe_generate_summary(
         summary_repo: SummaryRepository,
         user_id: int,
         character_id: int,
+        model_override: str | None = None
 ) -> None:
     """Генерирует summary, если накопилось достаточно новых сообщений."""
     current_summary = await summary_repo.get_summary(user_id, character_id)
@@ -80,8 +81,8 @@ async def maybe_generate_summary(
 
     # === СОЗДАЁМ ОТДЕЛЬНЫЙ КЛИЕНТ ДЛЯ SUMMARY (дешёвая модель) ===
     summary_settings = copy.deepcopy(get_llm_settings())
-    summary_settings.model = summary_settings.model_summary
-    summary_settings.max_tokens = 800
+    summary_settings.model = model_override if model_override else summary_settings.model_summary
+    summary_settings.max_tokens = 1000
 
     summary_llm = create_llm_client(session)
     summary_llm._settings = summary_settings
@@ -186,10 +187,17 @@ async def build_llm_context(
     # 🆕 ПРОВЕРКА НА ДЕГРАДАЦИЮ (Вызов функций, которые были внизу файла)
     is_degraded, warning = _check_history_degradation(deduplicated)
     if is_degraded:
-        system_content += warning
-        # Аварийная обрезка: оставляем только последние 4 сообщения, чтобы "выбить" паттерн
-        deduplicated = deduplicated[-4:]
-        logger.warning("🔄 History trimmed to last 4 messages due to degradation detected")
+        if "COPYPASTE" in warning:
+            # 🚨 ЯДЕРНЫЙ ВАРИАНТ: Если это точный копипаст, удаляем последний ответ ассистента из контекста.
+            # Это ломает петлю внимания модели, заставляя её ответить на сообщение пользователя заново.
+            if len(deduplicated) >= 2 and deduplicated[-1].get("role") == "assistant":
+                dropped_msg = deduplicated.pop()
+                logger.warning(
+                    f"🔄 DROPPED looping assistant message from context to force fresh generation: {dropped_msg['content'][:50]}...")
+        else:
+            # Для повторяющихся действий оставляем вашу логику обрезки
+            deduplicated = deduplicated[-4:]
+            logger.warning("🔄 History trimmed to last 4 messages due to action degradation")
 
     # Защита от переполнения
     MAX_HISTORY_CHARS = 32000  # 🆕 Увеличили лимит, чтобы не обрезало полезные сообщения

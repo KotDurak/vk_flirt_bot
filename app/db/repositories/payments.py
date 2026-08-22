@@ -1,4 +1,3 @@
-# app/db/repositories/payments.py
 from __future__ import annotations
 
 import logging
@@ -10,17 +9,17 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentRepository:
-    """Репозиторий для работы с платежами."""
+    """Репозиторий для работы с платежами и балансом."""
 
     def __init__(self, db: Database):
         self.db = db
 
     async def create_payment(
-        self,
-        user_id: int,
-        invoice_id: str,
-        amount: int,
-        messages: int,
+            self,
+            user_id: int,
+            invoice_id: str,
+            amount: int,
+            messages: int,
     ) -> None:
         """Создаёт запись о новом платеже."""
         conn = self.db.connection
@@ -68,7 +67,7 @@ class PaymentRepository:
         await conn.commit()
 
     async def add_user_messages(self, user_id: int, messages: int) -> None:
-        """Начисляет пользователю сообщения."""
+        """Начисляет пользователю сообщения (энергию)."""
         conn = self.db.connection
         await conn.execute(
             "UPDATE users SET messages = messages + ? WHERE id = ?",
@@ -88,24 +87,32 @@ class PaymentRepository:
 
     async def use_message(self, user_id: int) -> bool:
         """Списывает одно сообщение. Возвращает True, если успешно."""
+        return await self.deduct_messages(user_id, 1)
+
+    async def deduct_messages(self, user_id: int, amount: int) -> bool:
+        """
+        Списывает указанное количество сообщений.
+        Возвращает True, если списание прошло успешно (было достаточно средств).
+        """
         conn = self.db.connection
-        await conn.execute(
+        # Важно: условие messages >= ? гарантирует, что баланс не уйдет в минус
+        cursor = await conn.execute(
             """
             UPDATE users 
-            SET messages = messages - 1 
-            WHERE id = ? AND messages > 0
+            SET messages = messages - ? 
+            WHERE id = ? AND messages >= ?
             """,
-            (user_id,),
+            (amount, user_id, amount),
         )
         await conn.commit()
-        balance = await self.get_user_balance(user_id)
-        return balance >= 0
+
+        # Проверяем, действительно ли строка была обновлена
+        return cursor.rowcount > 0
 
     async def get_user_stats(self, user_id: int) -> dict:
         """Получает статистику пользователя."""
         conn = self.db.connection
 
-        # Всего сообщений отправлено (из таблицы messages)
         cursor = await conn.execute(
             "SELECT COUNT(*) FROM messages WHERE user_id = ?",
             (user_id,),
@@ -113,7 +120,6 @@ class PaymentRepository:
         row = await cursor.fetchone()
         total_messages = row[0] if row else 0
 
-        # Всего куплено энергии (из таблицы payments)
         cursor = await conn.execute(
             "SELECT COALESCE(SUM(messages), 0) FROM payments WHERE user_id = ? AND status = 'paid'",
             (user_id,),

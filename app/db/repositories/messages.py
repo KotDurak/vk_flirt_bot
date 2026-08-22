@@ -1,7 +1,6 @@
-# app/db/repositories/messages.py
 from __future__ import annotations
 import logging
-from typing import Optional
+from typing import Optional, List, Dict
 from app.db.connection import Database
 
 logger = logging.getLogger(__name__)
@@ -35,7 +34,7 @@ class MessageRepository:
             character_id: int,
             limit: int = 20,
             after_message_id: int = 0
-    ) -> list[dict]:
+    ) -> List[Dict]:
         """Возвращает последние N сообщений после указанного ID."""
         conn = self.db.connection
         cursor = await conn.execute(
@@ -47,6 +46,7 @@ class MessageRepository:
             (user_id, character_id, after_message_id, limit)
         )
         rows = await cursor.fetchall()
+        # Разворачиваем, чтобы вернуть в хронологическом порядке (от старых к новым)
         result = [{"role": row["role"], "content": row["content"], "id": row["id"]} for row in reversed(rows)]
         logger.info("📋 History loaded: %d messages (after id=%d)", len(result), after_message_id)
         return result
@@ -66,13 +66,12 @@ class MessageRepository:
             character_id: int,
             from_message_id: int,
             keep_last: int = 10
-    ) -> list[dict]:
+    ) -> List[Dict]:
         """
         Возвращает сообщения для генерации summary:
         от from_message_id до (последнее - keep_last).
         """
         conn = self.db.connection
-        # Сначала находим ID сообщения, до которого нужно брать
         cursor = await conn.execute(
             """
             SELECT id FROM messages
@@ -87,7 +86,6 @@ class MessageRepository:
 
         boundary_id = boundary_row["id"]
 
-        # Берем сообщения от from_message_id до boundary_id
         cursor = await conn.execute(
             """
             SELECT id, role, content FROM messages
@@ -148,3 +146,23 @@ class MessageRepository:
             (user_id, character_id, before_message_id)
         )
         await conn.commit()
+
+    async def delete_last_assistant_message(self, user_id: int, character_id: int) -> bool:
+        """
+        Удаляет последнее сообщение ассистента для этой пары user/character.
+        Возвращает True, если сообщение было найдено и удалено.
+        """
+        conn = self.db.connection
+        cursor = await conn.execute(
+            """
+            DELETE FROM messages 
+            WHERE id = (
+                SELECT id FROM messages 
+                WHERE user_id = ? AND character_id = ? AND role = 'assistant' 
+                ORDER BY id DESC LIMIT 1
+            )
+            """,
+            (user_id, character_id)
+        )
+        await conn.commit()
+        return cursor.rowcount > 0

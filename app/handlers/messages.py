@@ -1,3 +1,4 @@
+#app/handlers/messages.py
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from app.db.repositories.summaries import SummaryRepository
 from app.db.repositories.payments import PaymentRepository
 from app.services.payments.base import PaymentProvider
 from app.services.memory import maybe_generate_summary, build_llm_context
+from app.config import get_llm_settings
 from app.services.chat_queue import ChatTask
 
 logger = logging.getLogger(__name__)
@@ -78,19 +80,35 @@ def get_main_menu_keyboard() -> str:
     return kb.to_json()
 
 def get_dialog_keyboard() -> str:
-    """Клавиатура во время активного диалога (без кнопки 'Начать общение')."""
+    """Клавиатура во время активного диалога (нижняя панель)."""
     kb = KeyboardBuilder(one_time=False)
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
+def get_regenerate_inline_keyboard() -> str:
+    """Только кнопка регенерации, прикрепленная к сообщению."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+    kb.add_button("🔄 Перегенерировать (-1 ⚡)", payload={"cmd": "regenerate"}, color="secondary")
+    return kb.to_json()
+
 def get_characters_keyboard(characters: list[dict]) -> str:
-    """Создает клавиатуру со списком персонажей."""
+    """Создает клавиатуру со списком персонажей с метками NSFW."""
     kb = KeyboardBuilder(one_time=False)
+
     for char in characters:
+        # Проверяем метку (по умолчанию False, если вдруг у старого персонажа её нет)
+        is_nsfw = char.get("is_nsfw", False)
+
+        # Формируем название: добавляем [18+] для NSFW
+        label = f"{char['name']} 🔞" if is_nsfw else char['name']
+
+        # Выбираем цвет: красный для 18+, синий для обычных
+        btn_color = "negative" if is_nsfw else "primary"
+
         kb.add_button(
-            label=char["name"],
+            label=label,
             payload={"cmd": "select_char", "char_id": char["id"]},
-            color="primary"
+            color=btn_color
         )
         kb.row()
 
@@ -196,6 +214,7 @@ async def handle_update(
     answer = ""
     send_keyboard = None
     attachment = None
+    settings = get_llm_settings()
 
     # === ГЛАВНОЕ МЕНЮ ===
     if text_lower == "начать" or cmd == "start":
@@ -214,7 +233,11 @@ async def handle_update(
             answer = "Пока нет доступных персонажей. Загляни позже! 😿"
             send_keyboard = get_main_menu_keyboard()
         else:
-            answer = "👥 Выбери, с кем хочешь пообщаться:"
+            answer = (
+                "👥 Выбери, с кем хочешь пообщаться:\n\n"
+                "🔞 — дерзкие, манипулятивные персонажи, допускающие откровенные темы.\n"
+                "🌿 — персонажи для легкого, дружеского или интеллектуального общения."
+            )
             send_keyboard = get_characters_keyboard(characters)
 
     # === ВЫБОР КОНКРЕТНОГО ПЕРСОНАЖА ===
@@ -304,7 +327,7 @@ async def handle_update(
         result = await payment_provider.create_invoice(
             user_id=user["id"],
             amount=amount,
-            messages=energy,  # Передаём как messages (в БД поле называется messages)
+            messages=energy,
         )
 
         if result.success:
@@ -366,27 +389,73 @@ async def handle_update(
                 )
                 send_keyboard = get_check_payment_keyboard(invoice_id)
 
+    # === ПЕРЕГЕНЕРАЦИЯ ОТВЕТА ===
+    elif cmd == "regenerate":
+        current_char = await char_repo.get_user_character(user["id"])
+
+        if not current_char:
+            answer = "Сначала выбери персонажа! 👇"
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            balance = await payment_repo.get_user_balance(user["id"])
+            target_model = settings.model if current_char.get("is_nsfw") else settings.model_sfw
+            if balance <= 0:
+                answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить:"
+                send_keyboard = get_payment_keyboard()
+            else:
+                history = await msg_repo.get_recent_history(user["id"], current_char["id"], limit=2)
+
+                if len(history) < 2 or history[-1]["role"] != "assistant":
+                    answer = "Нечего перегенерировать. Напиши что-нибудь первым! 😉"
+                    send_keyboard = get_dialog_keyboard()
+                else:
+                    success = await payment_repo.deduct_messages(user["id"], 1)
+                    if not success:
+                        answer = "😿 Не удалось списать энергию. Попробуй позже."
+                        send_keyboard = get_main_menu_keyboard()
+                    else:
+                        # 1. Удаляем неудачный ответ ассистента из БД
+                        await msg_repo.delete_last_assistant_message(user["id"], current_char["id"])
+
+                        # 2. Берем текст последнего сообщения ПОЛЬЗОВАТЕЛЯ
+                        last_user_text = history[-2]["content"]
+
+                        # 3. Индикатор загрузки (БЕЗ keyboard, чтобы не стирать нижнее меню!)
+                        await api.send_message(
+                            peer_id=int(peer_id),
+                            text="🔄 Перегенерация ответа..."
+                        )
+                        # 4. Отправляем задачу в очередь заново с inline-клавиатурой
+                        await chat_queue.add(ChatTask(
+                            user_id=user["id"],
+                            char_id=current_char["id"],
+                            peer_id=int(peer_id),
+                            text=last_user_text,
+                            user_dict=user,
+                            char_dict=current_char,
+                            keyboard=get_regenerate_inline_keyboard(),
+                            is_regeneration=True,
+                            model_name=target_model,
+                        ))
+                        return
+
     # === ОБЫЧНЫЙ ДИАЛОГ С ПЕРСОНАЖЕМ ===
     else:
         if cmd == "chat":
             current_char = await char_repo.get_user_character(user["id"])
+
             if not current_char:
                 answer = "Сначала выбери персонажа! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                # 1. Проверяем, не начат ли уже диалог
-                existing_messages = await msg_repo.get_recent_history(
-                    user["id"], current_char["id"], limit=1
-                )
+                target_model = settings.model if current_char.get("is_nsfw") else settings.model_sfw
+                existing_messages = await msg_repo.get_recent_history(user["id"], current_char["id"], limit=1)
                 if existing_messages:
                     logger.info("⏭️ Dialog already started for user %s, ignoring", user["id"])
                     return
 
-                # 2. Пытаемся взять готовое приветствие из БД
                 greeting = current_char.get("greeting_message")
-
                 if greeting:
-                    # ВАРИАНТ А (Идеальный): Отправляем готовый текст. Быстро, бесплатно, без галлюцинаций.
                     await msg_repo.add_message(user["id"], current_char["id"], "assistant", greeting)
                     await api.send_message(
                         peer_id=int(peer_id),
@@ -394,9 +463,8 @@ async def handle_update(
                         keyboard=get_dialog_keyboard(),
                     )
                     logger.info("✅ Sent predefined greeting for user %s", user["id"])
-                    return  # Завершаем, LLM не нужен
+                    return
 
-                # ВАРИАНТ Б (Fallback): Если в БД нет greeting, используем твою рабочую очередь, но с жестким промптом
                 balance = await payment_repo.get_user_balance(user["id"])
                 if balance <= 0:
                     answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить общение:"
@@ -404,22 +472,18 @@ async def handle_update(
                     await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
 
-                # Показываем индикатор загрузки
-                await api.send_message(
-                    peer_id=int(peer_id),
-                    text="⏳",
-                    keyboard='{"buttons": []}',
-                )
+                # Индикатор загрузки (БЕЗ keyboard)
+                await api.send_message(peer_id=int(peer_id), text="⏳")
 
-                # Отправляем в очередь с ЖЕСТКИМ запретом на выдумывание сценариев
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=current_char["id"],
                     peer_id=int(peer_id),
-                    text="[СИСТЕМНАЯ КОМАНДА: Сгенерируй САМОЕ ПЕРВОЕ сообщение диалога. Обстановка: простая и повседневная (парк, скамейка, кафе). Ты занята своими делами. Твоя реакция на появление пользователя: холодная, ленивая, с легким скепсисом. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать вечеринки, драки или сложные сценарии. Формат: 1-2 коротких абзаца, действия в *звездочках*, речь с тире.]",
+                    text="[СИСТЕМНАЯ КОМАНДА: Сгенерируй САМОЕ ПЕРВОЕ сообщение диалога. Обстановка: простая и повседневная. Ты занята своими делами. Реакция: холодная, ленивая, с легким скепсисом. Формат: 1-2 коротких абзаца, действия в *звездочках*, речь с тире.]",
                     user_dict=user,
                     char_dict=current_char,
-                    keyboard=get_dialog_keyboard(),
+                    keyboard=get_regenerate_inline_keyboard(),
+                    model_name=target_model
                 ))
                 return
 
@@ -432,27 +496,19 @@ async def handle_update(
             send_keyboard = get_main_menu_keyboard()
         else:
             current_char = await char_repo.get_user_character(user["id"])
-
             if not current_char:
                 answer = "Сначала выбери персонажа, с которым хочешь пообщаться! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
+                target_model = settings.model if current_char.get("is_nsfw") else settings.model_sfw
                 balance = await payment_repo.get_user_balance(user["id"])
                 if balance <= 0:
-                    answer = (
-                        "😿 У тебя закончилась энергия!\n\n"
-                        "Купи новый пакет, чтобы продолжить общение:"
-                    )
+                    answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить общение:"
                     send_keyboard = get_payment_keyboard()
-                    await api.send_message(
-                        peer_id=int(peer_id),
-                        text=answer,
-                        keyboard=send_keyboard,
-                    )
+                    await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
 
                 char_id = current_char["id"]
-
                 await msg_repo.add_message(user["id"], char_id, "user", text)
 
                 await chat_queue.add(ChatTask(
@@ -462,9 +518,12 @@ async def handle_update(
                     text=text,
                     user_dict=user,
                     char_dict=current_char,
+                    keyboard=get_regenerate_inline_keyboard(),
+                    model_name=target_model
                 ))
                 return
 
+    # ЕДИНСТВЕННАЯ отправка системного ответа в конце (дубликат удален)
     await api.send_message(
         peer_id=int(peer_id),
         text=answer,
