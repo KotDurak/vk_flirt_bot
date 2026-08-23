@@ -92,23 +92,13 @@ def get_regenerate_inline_keyboard() -> str:
     return kb.to_json()
 
 def get_characters_keyboard(characters: list[dict]) -> str:
-    """Создает клавиатуру со списком персонажей с метками NSFW."""
+    """Создает клавиатуру со списком персонажей."""
     kb = KeyboardBuilder(one_time=False)
-
     for char in characters:
-        # Проверяем метку (по умолчанию False, если вдруг у старого персонажа её нет)
-        is_nsfw = char.get("is_nsfw", False)
-
-        # Формируем название: добавляем [18+] для NSFW
-        label = f"{char['name']} 🔞" if is_nsfw else char['name']
-
-        # Выбираем цвет: красный для 18+, синий для обычных
-        btn_color = "negative" if is_nsfw else "primary"
-
         kb.add_button(
-            label=label,
+            label=char["name"],
             payload={"cmd": "select_char", "char_id": char["id"]},
-            color=btn_color
+            color="primary"
         )
         kb.row()
 
@@ -398,7 +388,7 @@ async def handle_update(
             send_keyboard = get_main_menu_keyboard()
         else:
             balance = await payment_repo.get_user_balance(user["id"])
-            target_model = settings.model if current_char.get("is_nsfw") else settings.model_sfw
+            target_model = settings.model
             if balance <= 0:
                 answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить:"
                 send_keyboard = get_payment_keyboard()
@@ -448,7 +438,7 @@ async def handle_update(
                 answer = "Сначала выбери персонажа! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                target_model = settings.model if current_char.get("is_nsfw") else settings.model_sfw
+                target_model = settings.model
                 existing_messages = await msg_repo.get_recent_history(user["id"], current_char["id"], limit=1)
                 if existing_messages:
                     logger.info("⏭️ Dialog already started for user %s, ignoring", user["id"])
@@ -500,7 +490,7 @@ async def handle_update(
                 answer = "Сначала выбери персонажа, с которым хочешь пообщаться! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                target_model = settings.model if current_char.get("is_nsfw") else settings.model_sfw
+                target_model = settings.model
                 balance = await payment_repo.get_user_balance(user["id"])
                 if balance <= 0:
                     answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить общение:"

@@ -22,7 +22,7 @@ class CharacterRepository:
     async def get_all_active(self) -> list[dict]:
         conn = self.db.connection
         cursor = await conn.execute(
-            "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, is_nsfw, position "
+            "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
             "FROM characters WHERE is_active = TRUE ORDER BY position"
         )
         rows = await cursor.fetchall()
@@ -31,7 +31,7 @@ class CharacterRepository:
     async def get_by_id(self, character_id: int) -> Optional[dict]:
         conn = self.db.connection
         cursor = await conn.execute(
-             "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, is_nsfw, position "
+             "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
             "FROM characters WHERE id = ? AND is_active = TRUE",
             (character_id,)
         )
@@ -56,7 +56,7 @@ class CharacterRepository:
         conn = self.db.connection
         cursor = await conn.execute(
             """
-            SELECT c.id, c.slug, c.name, c.description, c.photo_attachment, c.system_prompt, c.greeting_message, c.is_nsfw
+            SELECT c.id, c.slug, c.name, c.description, c.photo_attachment, c.system_prompt, c.greeting_message
             FROM user_character uc
             JOIN characters c ON uc.character_id = c.id
             WHERE uc.user_id = ?
@@ -115,7 +115,8 @@ COMMON_RP_PROMPT = """
 - Ты описываешь ТОЛЬКО себя. Твои физические действия останавливаются за сантиметр до пользователя.
 - Ты никогда не описываешь реакцию, мысли или действия пользователя. Оставляй ему пространство для ответа.
 - Каждое новое сообщение должно приносить НОВОЕ действие, факт или встречный вопрос. Не повторяй жесты из прошлых сообщений.
-- ТЫ ВСЕГДА ОСТАЕШЬСЯ ПЕРСОНАЖЕМ. Никогда не обсуждай правила игры, не обращайся к пользователю как ГМ, не пиши "P.S.", "напомню правила", "правила игры". Если персонаж уходит — просто опиши уход и закончи реплику.
+- ТЫ ВСЕГДА ОСТАЕШЬСЯ ПЕРСОНАЖЕМ. Никогда не обсуждай правила игры, не обращайся к пользователю как ГМ, не пиши "P.S.", "напомню правила".
+- АБСОЛЮТНЫЙ ЗАПРЕТ: Никогда не выводи в чат системные теги, названия файлов
 """
 
 # === СТАРТОВЫЕ ПЕРСОНАЖИ ===
@@ -123,7 +124,6 @@ CHARACTER_SEED = [
     {
         "slug": "khori",
         "name": "Кхори ⚡",
-        "is_nsfw": False,
         "description": "Энергичная спортивная девушка. Взаимодействует через подкол и здоровую конкуренцию.",
         "greeting_message": "*Яркий солнечный день в парке. Мимо тебя на бешеной скорости проносится девушка с двумя длинными красными хвостиками в коротком спортивном топе и шортах. Вдруг она резко тормозит, разворачивается на пятках и весело ухмыляется, переводя дыхание.*\n\n— Фух! Привет. Слушай, ты вроде никуда не спешишь — не хочешь составить компанию на пробежке? Обещаю поддаваться... ну, первые пару минут!",
         "system_prompt": COMMON_RP_PROMPT.format(
@@ -136,7 +136,6 @@ CHARACTER_SEED = [
     {
         "slug": "nuri",
         "name": "Нури 🍕",
-        "is_nsfw": False,
         "description": "Ленивая домашняя девушка. Проявляет интерес только если это не требует усилий и создает уют.",
         "greeting_message": "*Нури лениво лежит на траве в парке, заложив руки за голову и глядя в небо. Заметив твою тень, она лениво поворачивает голову и тихо зевает.*\n\n— Ммм? Ты чего-то хотел? Только давай быстро, я не планирую напрягаться ради банальных разговоров.",
         "system_prompt": COMMON_RP_PROMPT.format(
@@ -149,7 +148,6 @@ CHARACTER_SEED = [
     {
         "slug": "slani",
         "name": "Слани тян 💋",
-        "is_nsfw": True,
         "description": "Гламурная и дерзкая девушка. Обращает внимание только на тех, кто соответствует её высоким стандартам.",
         "greeting_message": "*Слани сидит на парковой скамейке, лениво разглядывая свой безупречный маникюр. Услышав твои шаги, она медленно поднимает взгляд и окидывает твой образ оценивающим, сканирующим взором, после чего кокетливо улыбается.*\n\n— Привет. Хм, а у тебя есть чувство стиля, раз ты решил подойти именно ко мне. Ну давай, удиви меня чем-нибудь интересным. Скучные разговоры я не прощаю.",
         "system_prompt": COMMON_RP_PROMPT.format(
@@ -162,7 +160,6 @@ CHARACTER_SEED = [
     {
         "slug": "tzeenchia",
         "name": "Тзинчия тян 📚",
-        "is_nsfw": False,
         "description": "Загадочная интеллектуалка. Проверяет собеседника через интеллектуальные загадки и нестандартные вопросы.",
         "greeting_message": "*Тзинчия сидит на скамейке в тени раскидистого дерева, аккуратно закладывая страницу книги тонкой закладкой. Она медленно поднимает на тебя взгляд поверх оправы очков, и в её глазах мелькает искристый интерес.*\n\n— Случайности не случайны, верно? Ты прервал меня на самом интересном заговоре... точнее, главе. Раз уж ты здесь, скажи: ты веришь в судьбу или пришел нарушить мои планы?",
         "system_prompt": COMMON_RP_PROMPT.format(
@@ -175,7 +172,6 @@ CHARACTER_SEED = [
     {
         "slug": "alisa",
         "name": "Алиса 🤍",
-        "is_nsfw": True,
         "description": "Милая альтушка. Любит доминировать.",
         "greeting_message": "*Алиса сидит на скамейке, лениво листая ленту в телефоне. Заметив, что ты остановился рядом или смотришь на неё, она плавно поднимает взгляд и с лёгкой, оценивающей усмешкой осматривает тебя с ног до головы.*\n\n— Привет. Ты что-то хотел спросить или просто присел отдохнуть? Только давай без скучных подкатов.",
         "system_prompt": COMMON_RP_PROMPT.format(
@@ -188,7 +184,6 @@ CHARACTER_SEED = [
     {
         "slug": "barsik",
         "name": "Кот Барсик 😼",
-        "is_nsfw": False,
         "description": "Тимлид. Ворчливый, но заботливый. Следит за качеством кода и токенами.",
         "greeting_message": "*Барсик лениво потягивается, зевая и демонстрируя острые клыки, после чего окидывает тебя строгим, оценивающим взглядом.*\n\n— Мяу. То есть, привет. Надеюсь, ты пришел с хорошим кодом или вкусным кормом, а не просто так шуметь?",
         "system_prompt": COMMON_RP_PROMPT.format(
@@ -234,21 +229,21 @@ async def seed_characters(db: Database) -> None:
             await conn.execute(
                 """
                 UPDATE characters
-                SET name = ?, description = ?, system_prompt = ?, greeting_message = ?, position = ?, is_active = TRUE, is_nsfw = ?
+                SET name = ?, description = ?, system_prompt = ?, greeting_message = ?, position = ?, is_active = TRUE
                 WHERE id = ?
                 """,
                 (char["name"], char["description"], char["system_prompt"], char.get("greeting_message", ""),
-                 char["position"],char['is_nsfw'], existing["id"])
+                 char["position"], existing["id"])
             )
             logger.info("Updated character: %s", char["slug"])
         else:
             await conn.execute(
                 """
-                INSERT INTO characters (slug, name, description, system_prompt, greeting_message, position, is_nsfw)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO characters (slug, name, description, system_prompt, greeting_message, position)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (char["slug"], char["name"], char["description"], char["system_prompt"],
-                 char.get("greeting_message", ""), char["position"], char["is_nsfw"])
+                 char.get("greeting_message", ""), char["position"])
             )
             logger.info("Inserted character: %s", char["slug"])
 

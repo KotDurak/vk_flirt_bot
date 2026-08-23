@@ -21,7 +21,27 @@ def _truncate(value: str, limit: int = 1500) -> str:
 
 
 def _clean_response(text: str) -> str:
-    """Убирает английские вставки и мета-текст из ответа LLM."""
+    """Убирает английские вставки, мета-текст, системные теги и лишние абзацы из ответа LLM."""
+    if not text:
+        return ""
+
+    # 1. УДАЛЕНИЕ СИСТЕМНЫХ ТЕГОВ И РАЗМЕТКИ
+    # Убирает <MEMORY_CONTEXT>, </MEMORY_CONTEXT> и любые другие XML-подобные теги
+    text = re.sub(r'<[^>]+>', '', text)
+    # Убирает markdown-блоки кода, если модель вдруг решила оформить ответ как код
+    text = re.sub(r'```(?:markdown|json|text)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'```', '', text)
+
+    # 2. УДАЛЕНИЕ ЯВНЫХ УТЕЧЕК ПРОМПТА (Заголовки, правила)
+    leak_patterns = [
+        r'\+{2,}\s*диалог\.md.*',  # +++++ диалог.md
+        r'\[.*?(?:ФОРМАТ|ПРАВИЛО|КОНТЕКСТ|СИСТЕМНАЯ|АНКЕТА|ГРАНИЦЫ).*?\]',  # [ФОРМАТ ОТВЕТА] и т.д.
+        r'(?:Вот мой ответ|Как персонаж|Отыгрыш|Резюме):',  # Мета-вступления
+    ]
+    for pattern in leak_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
+
+    # 3. УДАЛЕНИЕ АНГЛИЙСКИХ ВСТАВОК (Ваш оригинальный код)
     replacements = {
         r'\bhandsome\b': 'красавчик', r'\bbaby\b': 'малыш',
         r'\bsweetheart\b': 'милый', r'\bhoney\b': 'солнце',
@@ -32,9 +52,37 @@ def _clean_response(text: str) -> str:
     }
     for pattern, replacement in replacements.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
     text = re.sub(r'\([^)]*Примечание[^)]*\)', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\([^)]*Note[^)]*\)', '', text, flags=re.IGNORECASE)
+
+    # 4. 🚨 УМНАЯ ОЧИСТКА АБЗАЦЕВ
+    # Берём первый абзац ТОЛЬКО если в нём нет прямой речи,
+    # иначе обрежем реплику персонажа.
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+
+    if len(paragraphs) > 1:
+        # Проверяем, есть ли прямая речь в первом абзаце
+        # (тире, кавычки или текст после звёздочек)
+        first_has_speech = bool(
+            re.search(r'[—\-]"', paragraphs[0]) or
+            re.search(r'\*[^*]+\*\s*\S', paragraphs[0])  # действие + текст после
+        )
+
+        if not first_has_speech:
+            # В первом абзаце только действие — берём его + следующий (где речь)
+            text = '\n\n'.join(paragraphs[:2])
+        else:
+            # В первом абзаце уже есть и действие, и речь — обрезаем мусор после
+            text = paragraphs[0]
+
+    # Если модель использовала одинарный перенос строки \n для разделения действий и речи,
+    # мы заменяем его на пробел, чтобы всё было в одну строку, как в вашем примере.
+    text = text.replace('\n', ' ')
+
+    # 5. Финальная зачистка множественных пробелов
     text = re.sub(r'\s+', ' ', text).strip()
+
     return text
 
 

@@ -132,11 +132,5 @@ async def run_migrations(db: Database) -> None:
     except Exception:
         pass  # Колонка уже существует, всё ок
 
-    try:
-        await conn.execute("ALTER TABLE characters ADD COLUMN is_nsfw BOOLEAN ")
-        logger.info("Added 'is_nsfw' column to characters table")
-    except Exception:
-        pass
-
     await conn.commit()
     logger.info("Migrations completed successfully")
