@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     db_path: str = "data/bot.db"
     llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
     payment_provider: str = "test"
+    yookassa_shop_id: str = ""
+    yookassa_secret_key: str = ""
+    yookassa_return_url: str = "https://vk.com/"
+    admin_ids: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="VK_BOT_",
@@ -20,6 +24,12 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    def is_admin(self, user_id: int) -> bool:
+        if not self.admin_ids:
+            return False
+        admin_list = [int(x.strip()) for x in self.admin_ids.split(",")]
+        return user_id in admin_list
 
 
 @lru_cache

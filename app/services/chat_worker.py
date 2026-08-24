@@ -10,7 +10,7 @@ from app.services.llm import create_llm_client
 from app.services.memory import maybe_generate_summary, build_llm_context
 from app.db.repositories.payments import PaymentRepository
 from app.vk.api import VKApi
-
+from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
@@ -173,7 +173,7 @@ async def process_chat_task(
         )
 
         # 🆕 Списываем сообщение ТОЛЬКО если это не старт и НЕ регенерация
-        if not is_start_message and is_real_answer and not is_regeneration:
+        if not is_start_message and is_real_answer and not is_regeneration and not get_settings().is_admin(task.user_dict['vk_user_id']):
             success = await payment_repo.use_message(task.user_id)
             if success:
                 new_balance = await payment_repo.get_user_balance(task.user_id)

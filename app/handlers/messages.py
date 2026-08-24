@@ -66,6 +66,27 @@ def _clean_response(text: str) -> str:
     return text
 
 
+async def shorten_url(long_url: str) -> str:
+    """
+    Сокращает ссылку через clck.ru (Яндекс).
+    ВК гораздо лояльнее относится к коротким ссылкам и реже показывает предупреждения.
+    """
+    if not long_url:
+        return ""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # clck.ru принимает исходный URL как параметр
+            async with session.get(f"https://clck.ru/--?url={long_url}") as resp:
+                if resp.status == 200:
+                    short_url = await resp.text()
+                    logger.info("🔗 URL shortened: %s -> %s", long_url, short_url.strip())
+                    return short_url.strip()
+    except Exception as e:
+        logger.warning("⚠️ Failed to shorten URL: %s. Using original.", e)
+
+    # Если сокращение не удалось, возвращаем оригинал
+    return long_url
+
 def get_main_menu_keyboard() -> str:
     """Главное меню бота."""
     kb = KeyboardBuilder(one_time=False)
@@ -326,12 +347,14 @@ async def handle_update(
                 messages=energy,
             )
 
+            short_url = await shorten_url(result.payment_url)
+
             answer = (
                 f"💳 Оплата {amount}₽ за {energy} энергии\n\n"
                 f"1. Перейди по ссылке для оплаты\n"
                 f"2. Выбери удобный способ оплаты\n"
                 f"3. После оплаты нажми кнопку 'Проверить'\n\n"
-                f"Ссылка на оплату:\n{result.payment_url}"
+                f"Ссылка на оплату:\n{short_url}"
             )
             send_keyboard = get_check_payment_keyboard(result.invoice_id)
         else:
