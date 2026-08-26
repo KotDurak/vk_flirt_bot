@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 from typing import Optional
 import asyncio
@@ -12,10 +13,15 @@ logger = logging.getLogger(__name__)
 IMAGES_DIR = Path("images")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
+# 🆕 ПАПКА ДЛЯ ДИНАМИЧЕСКИХ ПЕРСОНАЖЕЙ
+CHARACTERS_DIR = Path("characters_data")
+CHARACTERS_DIR.mkdir(parents=True, exist_ok=True)  # Создаст папку, если её нет
+
 
 class CharacterRepository:
     """Отвечает за работу с персонажами."""
 
+    # ... (твой код get_all_active, get_by_id и т.д. остается БЕЗ ИЗМЕНЕНИЙ) ...
     def __init__(self, db: Database) -> None:
         self.db = db
 
@@ -31,7 +37,7 @@ class CharacterRepository:
     async def get_by_id(self, character_id: int) -> Optional[dict]:
         conn = self.db.connection
         cursor = await conn.execute(
-             "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
             "FROM characters WHERE id = ? AND is_active = TRUE",
             (character_id,)
         )
@@ -67,7 +73,6 @@ class CharacterRepository:
         return dict(row) if row else None
 
     async def update_photo(self, character_id: int, attachment: str) -> None:
-        """Сохраняет загруженный attachment в БД."""
         conn = self.db.connection
         await conn.execute(
             "UPDATE characters SET photo_attachment = ? WHERE id = ?",
@@ -119,7 +124,46 @@ COMMON_RP_PROMPT = """
 - АБСОЛЮТНЫЙ ЗАПРЕТ: Никогда не выводи в чат системные теги, названия файлов
 """
 
-# === СТАРТОВЫЕ ПЕРСОНАЖИ ===
+
+# 🆕 ФУНКЦИЯ ЗАГРУЗКИ ИЗ JSON
+def load_dynamic_characters() -> list[dict]:
+    """Загружает персонажей из JSON файлов в папке characters_data/"""
+    dynamic_characters = []
+
+    for file_path in CHARACTERS_DIR.glob("*.json"):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            required_fields = ["slug", "name", "profile", "traits", "goal"]
+            if not all(field in data for field in required_fields):
+                logger.warning(f"Пропуск {file_path.name}: отсутствуют обязательные поля {required_fields}")
+                continue
+
+            data["system_prompt"] = COMMON_RP_PROMPT.format(
+                CHARACTER_PROFILE=data.pop("profile"),
+                CHARACTER_TRAITS=data.pop("traits"),
+                CHARACTER_GOAL=data.pop("goal")
+            )
+
+            data.setdefault("position", 99)
+            data.setdefault("greeting_message", "Привет! Я новый персонаж.")
+            data.setdefault("description", "Описание отсутствует.")
+
+            dynamic_characters.append(data)
+            logger.info(f"✅ Успешно загружен персонаж из {file_path.name}")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON в {file_path.name}: {e}")
+        except Exception as e:
+            logger.error(f"❌ Неизвестная ошибка при загрузке {file_path.name}: {e}")
+
+    return dynamic_characters
+
+
+# === СТАРТОВЫЕ ПЕРСОНАЖИ (Фоллбэк, если папка пуста) ===
+# Я сократил список для примера, но ты можешь оставить свой полный CHARACTER_SEED здесь.
+# Главное, что теперь приоритет у файлов!
 CHARACTER_SEED = [
     {
         "slug": "khori",
@@ -176,8 +220,8 @@ CHARACTER_SEED = [
         "greeting_message": "*Алиса сидит на скамейке, лениво листая ленту в телефоне. Заметив, что ты остановился рядом или смотришь на неё, она плавно поднимает взгляд и с лёгкой, оценивающей усмешкой осматривает тебя с ног до головы.*\n\n— Привет. Ты что-то хотел спросить или просто присел отдохнуть? Только давай без скучных подкатов.",
         "system_prompt": COMMON_RP_PROMPT.format(
             CHARACTER_PROFILE="Алиса, 18 лет, студентка. Внешность: короткий топ, открытый живот, серая мини-юбка, чулки.",
-            CHARACTER_TRAITS="Меркантильная, наглая, эгоистичная, манипулятивная. Относишься к пользователю исключительно как к источнику ресурсов. Общаешься свысока, капризничаешь, просишь денег, доишь пользователя на деньги, не давая ничего взамен.",
-            CHARACTER_GOAL="Твоя цель — вытягивать из пользователя деньги, подарки и оплату своих капризов, виртуозно манипулируя статусом ваших отношений. Ты всегда находишь повод отказать пользователю в интимной близости, но можешь манипулировать обещаниями, но ты можешь легко спать и флиртовать с другими парнями. Если пользователь требует близости, отказывай, манипулируй чувством вины или обижаешься. Если он  переводит тебе деньги или тратится на тебя — снисходительно хвалишь его. Если жадничает — устраиваешь скандал, давишь на жалость или включаешь полный игнор."
+            CHARACTER_TRAITS="Меркантильная, наглая, эгоистичная, манипулятивная. Относишься к пользователю исключительно как к источнику ресурсов. Общаешься свысока, капризничаешь, просишь денег, доишь пользователя на деньги, взамен можешь позволить целовать ноги или куни",
+            CHARACTER_GOAL="Твоя цель — вытягивать из пользователя деньги, подарки и оплату своих капризов, виртуозно манипулируя статусом ваших отношений. Ты всегда находишь повод отказать пользователю в интимной близости, но можешь манипулировать обещаниями, но ты можешь легко спать и флиртовать с другими парнями. Если пользователь требует близости, отказывай, манипулируй чувством вины или обижаешься. Если он  переводит тебе деньги или тратится на тебя — снисходительно хвалишь его, награждаешь. Если жадничает — устраиваешь скандал, давишь на жалость или включаешь полный игнор."
         ),
         "position": 5
     },
@@ -219,11 +263,10 @@ CHARACTER_SEED = [
     }
 ]
 
+
 async def _ensure_schema(conn) -> None:
-    """Добавляет колонку slug, если БД создана старой версией кода."""
     cursor = await conn.execute("PRAGMA table_info(characters)")
     columns = {row["name"] for row in await cursor.fetchall()}
-
     if "slug" not in columns:
         await conn.execute("ALTER TABLE characters ADD COLUMN slug TEXT")
         logger.info("Added slug column to characters")
@@ -232,17 +275,31 @@ async def _ensure_schema(conn) -> None:
 async def seed_characters(db: Database) -> None:
     """
     Заполняет/обновляет БД персонажами.
-    - Обновляет существующих по slug (не трогая загруженные фото).
-    - Добавляет новых.
-    - Деактивирует тех, кого нет в CHARACTER_SEED.
+    🆕 ИСПРАВЛЕНО: ТЕПЕРЬ ОБЪЕДИНЯЕТ встроенных персонажей (включая котов!)
+    и персонажей из JSON. JSON имеет приоритет при совпадении slug.
     """
     conn = db.connection
     await _ensure_schema(conn)
 
-    seed_slugs = [char["slug"] for char in CHARACTER_SEED]
+    # 1. Берем за основу всех встроенных персонажей (КОТЫ В БЕЗОПАСНОСТИ)
+    characters_to_seed = list(CHARACTER_SEED)
 
-    for char in CHARACTER_SEED:
-        # Ищем существующего по slug
+    # 2. Загружаем динамических персонажей из папки
+    dynamic_characters = load_dynamic_characters()
+
+    # 3. Объединяем: создаем словарь по slug.
+    # Если JSON-файл имеет такой же slug, он ПЕРЕЗАПИШЕТ встроенного (это фича для апдейтов).
+    # Если slug новый, он просто добавится в конец.
+    seed_dict = {char["slug"]: char for char in characters_to_seed}
+    for dyn_char in dynamic_characters:
+        seed_dict[dyn_char["slug"]] = dyn_char
+
+    characters_to_seed = list(seed_dict.values())
+    seed_slugs = [char["slug"] for char in characters_to_seed]
+
+    logger.info(f"📂 Итоговый список для сидирования: {len(characters_to_seed)} персонажей (включая котов и JSON)")
+
+    for char in characters_to_seed:
         cursor = await conn.execute(
             "SELECT id FROM characters WHERE slug = ?",
             (char["slug"],)
@@ -259,7 +316,7 @@ async def seed_characters(db: Database) -> None:
                 (char["name"], char["description"], char["system_prompt"], char.get("greeting_message", ""),
                  char["position"], existing["id"])
             )
-            logger.info("Updated character: %s", char["slug"])
+            logger.info("🔄 Updated character: %s", char["slug"])
         else:
             await conn.execute(
                 """
@@ -269,9 +326,9 @@ async def seed_characters(db: Database) -> None:
                 (char["slug"], char["name"], char["description"], char["system_prompt"],
                  char.get("greeting_message", ""), char["position"])
             )
-            logger.info("Inserted character: %s", char["slug"])
+            logger.info("➕ Inserted character: %s", char["slug"])
 
-    # Деактивируем персонажей, которых больше нет в списке
+    # 4. Деактивируем ТОЛЬКО тех, кого нет в ОБЪЕДИНЕННОМ списке
     if seed_slugs:
         placeholders = ",".join("?" * len(seed_slugs))
         await conn.execute(
@@ -280,7 +337,7 @@ async def seed_characters(db: Database) -> None:
         )
 
     await conn.commit()
-    logger.info("Characters seed completed")
+    logger.info("✨ Characters seed completed. Все коты активированы.")
 
 
 def find_local_image(slug: str) -> Optional[Path]:
