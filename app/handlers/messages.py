@@ -112,17 +112,23 @@ def get_regenerate_inline_keyboard() -> str:
     kb.add_button("🔄 Перегенерировать (-1 ⚡)", payload={"cmd": "regenerate"}, color="secondary")
     return kb.to_json()
 
-def get_characters_keyboard(characters: list[dict]) -> str:
+
+def get_characters_keyboard(characters: list[dict], per_row: int = 2) -> str:
     """Создает клавиатуру со списком персонажей."""
     kb = KeyboardBuilder(one_time=False)
-    for char in characters:
+
+    for i, char in enumerate(characters):
         kb.add_button(
             label=char["name"],
             payload={"cmd": "select_char", "char_id": char["id"]},
             color="primary"
         )
-        kb.row()
+        # Переходим на новый ряд после каждых per_row кнопок
+        if (i + 1) % per_row == 0:
+            kb.row()
 
+    # Перед кнопкой "В главное меню" всегда делаем новый ряд
+    kb.row()
     kb.add_button("⬅️ В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
@@ -258,7 +264,19 @@ async def handle_update(
             answer = "Персонаж не найден 😿"
             send_keyboard = get_main_menu_keyboard()
         else:
+            # 1. Сначала узнаем, был ли у пользователя ДРУГОЙ персонаж до этого
+            old_char = await char_repo.get_user_character(user["id"])
+
+            # 2. Если был, и он НЕ совпадает с новым, стираем его историю и саммари
+            if old_char and old_char["id"] != character["id"]:
+                await msg_repo.clear_history(user["id"], old_char["id"])
+                await summary_repo.clear_summary(user["id"], old_char["id"])
+                logger.info("🧹 Cleared history for old character %s", old_char["id"])
+
+            # 3. Устанавливаем нового персонажа
             await char_repo.set_user_character(user["id"], character["id"])
+
+            # 4. На всякий случай чистим историю нового персонажа (она и так должна быть пустой)
             await msg_repo.clear_history(user["id"], character["id"])
             await summary_repo.clear_summary(user["id"], character["id"])
 

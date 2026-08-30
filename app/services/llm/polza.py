@@ -52,9 +52,9 @@ class LLMPolza(LLMBase):
             "messages": messages,
             "max_tokens": self._settings.max_tokens,
             "temperature": self._settings.temperature,
-            "frequency_penalty": 1.1,
+            "frequency_penalty": 0.4,
             "presence_penalty": 0.5,
-            "top_p": 0.85,
+            "top_p": 0.9,
             "stop": ["P.S", "@id", "(*", "User:"]
         }
 

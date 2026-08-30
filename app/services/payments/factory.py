@@ -18,7 +18,7 @@ def create_payment_provider() -> PaymentProvider:
     """
     settings = get_settings()
     provider = getattr(settings, 'payment_provider', 'test').lower()
-    print(provider)
+
     if provider == "test":
         logger.info("💳 Using TestPaymentProvider")
         return TestPaymentProvider()

@@ -11,3 +11,4 @@ __pycache__/
 /logs/
 /.env.old
 /characters_data/
+/images/
