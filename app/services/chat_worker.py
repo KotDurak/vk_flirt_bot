@@ -17,7 +17,7 @@ import copy
 
 logger = logging.getLogger(__name__)
 
-MAX_REGEN_ATTEMPTS = 4  # Максимум попыток перегенерации при обнаружении повтора
+MAX_REGEN_ATTEMPTS = 5  # Максимум попыток перегенерации при обнаружении повтора
 
 
 def _truncate(value: str, limit: int = 1500) -> str:
@@ -142,7 +142,7 @@ def _clean_response(text: str) -> str:
             paragraphs = [action, speech]
 
     # Собираем обратно, максимум 2-3 абзаца
-    clean_text = '\n\n'.join(paragraphs[:3])
+    clean_text = '\n\n'.join(paragraphs)
 
     # 5. Финальная зачистка множественных пробелов внутри строк
     lines = clean_text.split('\n\n')
@@ -296,6 +296,28 @@ async def process_chat_task(
                         )
                     })
                     continue  # Пробуем снова с увеличенной temperature
+            # 🆕 НОВАЯ ПРОВЕРКА: Многословность
+            if _is_too_verbose(candidate_answer):
+                if attempt < MAX_REGEN_ATTEMPTS:
+                    logger.warning(f"📜 Response too verbose (attempt {attempt + 1}). Regenerating...")
+
+                    # Находим последнее сообщение пользователя
+                    last_user_msg = ""
+                    for msg in reversed(messages):
+                        if msg["role"] == "user":
+                            last_user_msg = msg["content"]
+                            break
+
+                    # Добавляем "ругалку" в стиле Барсика
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"[ВНИМАНИЕ]: Ты слишком многословна! "
+                            f"Сократи ответ до 2-3 ёмких абзацев. Оставь только самые важные действия и реплики, "
+                            f"говори по делу, реагируя на это сообщение пользователя: '{last_user_msg[:100]}'. "
+                        )
+                    })
+                    continue
                 else:
                     # 🚨 FALLBACK: Модель полностью сломана
                     logger.warning("⚠️ All regen attempts exhausted. Activating SAFE FALLBACK.")
@@ -390,3 +412,14 @@ def _is_ai_refusal(text: str) -> bool:
         return True
 
     return False
+
+
+def _is_too_verbose(text: str) -> bool:
+    """Проверяет, не слишком ли многословен ответ."""
+    if not text:
+        return False
+
+    paragraphs = [p for p in text.split('\n\n') if p.strip()]
+
+    # Больше 5 абзацев ИЛИ больше 1500 символов (мягче, чем 2000)
+    return len(paragraphs) > 5 or len(text) > 1500
