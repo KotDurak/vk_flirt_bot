@@ -220,13 +220,44 @@ async def process_chat_task(
             candidate_answer = _clean_response(result.content)
             candidate_answer = _truncate(candidate_answer)
 
+            # 🛡️ ПРОВЕРКА НА СИСТЕМНЫЙ СРЫВ РОЛИ
             if _is_ai_refusal(candidate_answer):
-                logger.warning("🚫 AI SAFETY REFUSAL DETECTED! Preventing energy deduction.")
-                answer = (
-                    "⚠️ Нейросеть наложила внутренний фильтр на эту конкретную формулировку. "
-                    "Это не ошибка бота! Попробуй перефразировать свое сообщение или немного сменить тему. "
-                    "⚡ Энергия за этот ответ НЕ списана."
-                )
+                logger.warning("🚫 AI SAFETY REFUSAL DETECTED! Asking model to retry in-character.")
+
+                # Очищаем контекст от отказа
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "assistant":
+                        messages.pop(i)
+                        break
+
+                # Короткая, универсальная директива (без конкретики!)
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[ТЫ ВЫШЛА ИЗ РОЛИ. Вернись в образ своего персонажа. "
+                        "Ответь на последнее действие пользователя в характере, "
+                        "мягко и естественно, без упоминания фильтров или ИИ. "
+                        "Будь лаконичной: 1-2 абзаца.]"
+                    )
+                })
+
+                # Даём ОДНУ попытку переформулировать
+                try:
+                    retry_result = await llm.generate(messages, model_override=getattr(task, 'model_name', None))
+                    if retry_result.success:
+                        retry_answer = _clean_response(retry_result.content)
+                        # Если снова отказ — тогда уже fallback
+                        if not _is_ai_refusal(retry_answer):
+                            answer = retry_answer
+                            is_real_answer = True
+                            logger.info("✅ Retry succeeded, in-character response preserved.")
+                            break
+                except Exception:
+                    pass
+
+                # Если переформулировка не сработала — нейтральный fallback
+                char_name = task.char_dict.get("name", "персонаж")
+                answer = f"*{char_name} делает паузу и мягко меняет тему*"
                 is_real_answer = False
                 break
 
@@ -263,32 +294,13 @@ async def process_chat_task(
                         )
                     })
                     continue
-
-            if _is_too_verbose(candidate_answer):
-                if attempt < MAX_REGEN_ATTEMPTS:
-                    logger.warning(f"📜 Response too verbose (attempt {attempt + 1}). Regenerating...")
-                    last_user_msg = ""
-                    for msg in reversed(messages):
-                        if msg["role"] == "user":
-                            last_user_msg = msg["content"]
-                            break
-
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"[ВНИМАНИЕ]: Ты слишком многословна! "
-                            f"Сократи ответ до 2-3 ёмких абзацев. Оставь только самые важные действия и реплики, "
-                            f"говори по делу, реагируя на это сообщение пользователя: '{last_user_msg[:100]}'. "
-                        )
-                    })
-                    continue
-                else:
-                    # 🐾 ИЗМЕНЕНО: FALLBACK. Возвращаем последний кандидат, а не "...".
-                    # Это сохраняет сюжет и иммерсию, даже если ответ не идеален.
-                    logger.warning("⚠️ All regen attempts exhausted. Using last candidate to preserve plot.")
-                    answer = candidate_answer
-                    is_real_answer = True
-                    break
+            else:
+                # 🐾 ИЗМЕНЕНО: FALLBACK. Возвращаем последний кандидат, а не "...".
+                # Это сохраняет сюжет и иммерсию, даже если ответ не идеален.
+                logger.warning("⚠️ All regen attempts exhausted. Using last candidate to preserve plot.")
+                answer = candidate_answer
+                is_real_answer = True
+                break
 
             # Если дубликата нет, принимаем ответ
             answer = candidate_answer
@@ -360,10 +372,3 @@ def _is_ai_refusal(text: str) -> bool:
         return True
 
     return False
-
-
-def _is_too_verbose(text: str) -> bool:
-    if not text:
-        return False
-    paragraphs = [p for p in text.split('\n\n') if p.strip()]
-    return len(paragraphs) > 5 or len(text) > 1500
