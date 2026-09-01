@@ -3,25 +3,25 @@ module.exports = {
     {
       name: 'vk-flirt-bot',
 
-      // 🆕 Запускаем обёртку вместо -m
-      script: './run.py',
+      // 🐾 ХИТРОСТЬ: Указываем сам Python из venv как "скрипт"
+      script: '/root/vk_flirt_bot/venv/bin/python',
 
-      // Интерпретатор из .venv
-      interpreter: 'D:\\vk_flirt_bot\\.venv\\Scripts\\python.exe',
+      // 🐾 А флаг -m и имя модуля передаем как аргументы
+      args: '-m app.main',
 
-      // Рабочая директория
-      cwd: 'D:\\vk_flirt_bot',
+      // Рабочая директория (ОБЯЗАТЕЛЬНО абсолютный путь из шага 1)
+      cwd: '/root/vk_flirt_bot',
 
       // Перезапуск при падении
       autorestart: true,
       max_restarts: 10,
       restart_delay: 3000,
 
-      // Переменные окружения
+      // Переменные окружения (PYTHONPATH эмулирует поведение флага -m)
       env: {
         PYTHONIOENCODING: 'utf-8',
-        PYTHONPATH: 'D:\\vk_flirt_bot',
         PYTHONUNBUFFERED: '1',
+        PYTHONPATH: '/root/vk_flirt_bot/'
       },
 
       // Логи
