@@ -19,6 +19,7 @@ from app.services.payments.base import PaymentProvider
 from app.services.memory import maybe_generate_summary, build_llm_context
 from app.config import get_llm_settings
 from app.services.chat_queue import ChatTask
+from app.config import get_settings, get_llm_settings
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +419,45 @@ async def handle_update(
                 )
                 send_keyboard = get_check_payment_keyboard(invoice_id)
 
+    # === СМЕНА МОДЕЛИ (ТОЛЬКО ДЛЯ АДМИНА) ===
+    elif text_lower.startswith("/model") or cmd == "model":
+        if not get_settings().is_admin(int(from_id)):
+            answer = "🔒 Эта команда доступна только администратору."
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            # Импортируем здесь, чтобы избежать циклических зависимостей, если MODELS_LIST в config
+            from app.config import MODELS_LIST
+            available_models = list(MODELS_LIST.keys())
+            parts = text_lower.split(maxsplit=1)
+
+            if len(parts) == 1:
+                # Показать текущую и список
+                current_model = user.get("preferred_model") or get_llm_settings().model
+                msg = f"⚙️ Твоя текущая модель: `{current_model}`\n\n📋 Доступные модели:\n"
+                for i, m_key in enumerate(available_models, 1):
+                    msg += f"{i}. `{m_key}`\n"
+                msg += "\n💡 Чтобы сменить, напиши: `/model <номер>` или `/model <точное_название>`"
+                answer = msg
+                send_keyboard = get_main_menu_keyboard()
+            else:
+                query = parts[1].strip()
+                new_model = None
+
+                # Если ввели номер
+                if query.isdigit():
+                    idx = int(query) - 1
+                    if 0 <= idx < len(available_models):
+                        new_model = available_models[idx]
+                # Если ввели название
+                elif query in available_models:
+                    new_model = query
+
+                if new_model:
+                    await user_repo.update_preferred_model(int(from_id), new_model)
+                    answer = f"✅ Модель успешно изменена на: `{new_model}`"
+                else:
+                    answer = "❌ Модель не найдена. Используй `/model` для просмотра списка."
+                send_keyboard = get_main_menu_keyboard()
     # === ПЕРЕГЕНЕРАЦИЯ ОТВЕТА ===
     elif cmd == "regenerate":
         current_char = await char_repo.get_user_character(user["id"])
@@ -454,6 +494,8 @@ async def handle_update(
                             peer_id=int(peer_id),
                             text="🔄 Перегенерация ответа..."
                         )
+                        active_model = user.get("preferred_model") or target_model
+
                         # 4. Отправляем задачу в очередь заново с inline-клавиатурой
                         await chat_queue.add(ChatTask(
                             user_id=user["id"],
@@ -464,7 +506,7 @@ async def handle_update(
                             char_dict=current_char,
                             keyboard=get_regenerate_inline_keyboard(),
                             is_regeneration=True,
-                            model_name=target_model,
+                            model_name=active_model,
                         ))
                         return
 
@@ -503,6 +545,7 @@ async def handle_update(
 
                 # Индикатор загрузки (БЕЗ keyboard)
                 await api.send_message(peer_id=int(peer_id), text="⏳")
+                active_model = user.get("preferred_model") or target_model
 
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
@@ -512,7 +555,7 @@ async def handle_update(
                     user_dict=user,
                     char_dict=current_char,
                     keyboard=get_regenerate_inline_keyboard(),
-                    model_name=target_model
+                    model_name=active_model
                 ))
                 return
 
@@ -539,7 +582,7 @@ async def handle_update(
 
                 char_id = current_char["id"]
                 await msg_repo.add_message(user["id"], char_id, "user", text)
-
+                active_model = user.get("preferred_model") or target_model
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=char_id,
@@ -548,7 +591,7 @@ async def handle_update(
                     user_dict=user,
                     char_dict=current_char,
                     keyboard=get_regenerate_inline_keyboard(),
-                    model_name=target_model
+                    model_name=active_model
                 ))
                 return
 

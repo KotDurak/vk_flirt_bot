@@ -1,7 +1,7 @@
 from functools import lru_cache
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
+import app.models_list
 
 class Settings(BaseSettings):
     group_token: str
@@ -73,3 +73,6 @@ class LLMSettings(BaseSettings):
 def get_llm_settings() -> LLMSettings:
     """Возвращает настройки LLM."""
     return LLMSettings()
+
+
+MODELS_LIST = app.models_list.MODELS_LIST

@@ -132,5 +132,13 @@ async def run_migrations(db: Database) -> None:
     except Exception:
         pass  # Колонка уже существует, всё ок
 
+    # === ДИНАМИЧЕСКАЯ МОДЕЛЬ ДЛЯ ПОЛЬЗОВАТЕЛЯ ===
+    try:
+        # Добавляем колонку с дефолтной моделью (подставь ту, которая у тебя сейчас основная)
+        await conn.execute("ALTER TABLE users ADD COLUMN preferred_model TEXT DEFAULT 'thedrummer/cydonia-24b-v4.1'")
+        logger.info("Added 'preferred_model' column to users table")
+    except Exception:
+        pass  # Колонка уже существует
+
     await conn.commit()
     logger.info("Migrations completed successfully")

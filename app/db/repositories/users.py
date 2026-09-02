@@ -20,7 +20,7 @@ class UserRepository:
         conn = self.db.connection
 
         cursor = await conn.execute(
-            "SELECT id, vk_user_id,created_at,is_premium,messages FROM users WHERE vk_user_id = ?", (vk_user_id,)
+            "SELECT id, vk_user_id,created_at,is_premium,messages,preferred_model FROM users WHERE vk_user_id = ?", (vk_user_id,)
         )
         row = await cursor.fetchone()
 
@@ -31,6 +31,7 @@ class UserRepository:
                 "created_at": row[2],
                 "is_premium": row[3],
                 "messages": row[4],
+                "preferred_model":row[5],
             }
 
         # Создаём нового пользователя
@@ -52,3 +53,11 @@ class UserRepository:
             "is_premium": row[3],
             "messages": row[4],
         }
+
+    async def update_preferred_model(self, vk_user_id: int, model_name: str) -> None:
+        """Обновляет предпочтенную модель для пользователя."""
+        await self.db.connection.execute(
+            "UPDATE users SET preferred_model = ? WHERE vk_user_id = ?",
+            (model_name, vk_user_id)
+        )
+        await self.db.connection.commit()
