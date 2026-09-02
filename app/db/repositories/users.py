@@ -42,7 +42,8 @@ class UserRepository:
         await conn.commit()
 
         cursor = await conn.execute(
-            "SELECT * FROM users WHERE vk_user_id = ?", (vk_user_id,)
+            "SELECT id, vk_user_id,created_at,is_premium,messages,preferred_model FROM users WHERE vk_user_id = ?",
+            (vk_user_id,)
         )
         row = await cursor.fetchone()
 
@@ -52,6 +53,7 @@ class UserRepository:
             "created_at": row[2],
             "is_premium": row[3],
             "messages": row[4],
+            "preferred_model": row[5],
         }
 
     async def update_preferred_model(self, vk_user_id: int, model_name: str) -> None:
