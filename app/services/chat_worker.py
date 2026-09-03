@@ -18,7 +18,6 @@ import copy
 logger = logging.getLogger(__name__)
 
 # 🐾 Даем модели 2 попытки перегенерации (всего 3 запроса к API: 0, 1, 2).
-# Это ломает упрямые циклы копипаста.
 MAX_REGEN_ATTEMPTS = 2
 
 
@@ -28,88 +27,46 @@ def _truncate(value: str, limit: int = 1500) -> str:
     return value[: limit - 1] + "…"
 
 
-def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[
-    bool, list[str]]:
-    logger.info(
-        f"🔍 [DEBUG] Проверка на дубликат. Новых символов: {len(new_response)}, Сообщений ассистента в контексте: {len(recent_assistant_msgs)}")
-
+def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[bool, list[str]]:
+    """
+    Детектор зацикливания: ловит копипаст и повторяющиеся действия.
+    """
     if len(recent_assistant_msgs) < 2:
-        logger.warning("⚠️ [DEBUG] Пропуск проверки: в контексте меньше 2 сообщений ассистента!")
         return False, []
 
-    window = recent_assistant_msgs[-5:]
-    bad_phrases = set()
+    # 1. Полный копипаст (схожесть > 0.90)
+    last_msg = recent_assistant_msgs[-1]
+    if len(new_response) > 50 and len(last_msg) > 50:
+        sim = SequenceMatcher(None, new_response, last_msg).ratio()
+        if sim > 0.90:
+            logger.warning(f"🚨 HARD COPYPASTE DETECTED (sim={sim:.2f})")
+            return True, ["Полный копипаст последнего ответа"]
 
-    # 1. ЖЕСТКАЯ ПРОВЕРКА НА КОПИПАСТ (всей строки)
-    for old_msg in window:
-        if len(old_msg) > 50 and len(new_response) > 50:
-            similarity = SequenceMatcher(None, new_response, old_msg).ratio()
-            if similarity > 0.85:
-                logger.warning(f"🚨 HARD LOOP DETECTED (sim={similarity:.2f})")
-                return True, ["Почти полный копипаст предыдущего сообщения"]
+    # 2. Зацикливание действий (повторяющиеся фразы в звездочках)
+    def extract_actions(text: str) -> set[str]:
+        actions = re.findall(r'\*([^*]+)\*', text.lower())
+        return set(a.strip() for a in actions if len(a.strip()) > 10)
 
-    # 🆕 1.5. ПРОВЕРКА НА "КАРКАС" (Идентичные действия, разный текст)
-    # Извлекаем первый абзац (обычно это действие в звездочках)
-    new_first_para = new_response.split('\n\n')[0].strip()
-    for old_msg in window:
-        old_first_para = old_msg.split('\n\n')[0].strip()
-        if len(new_first_para) > 30 and len(old_first_para) > 30:
-            frame_sim = SequenceMatcher(None, new_first_para, old_first_para).ratio()
-            if frame_sim > 0.85:
-                logger.warning(f"🚨 FRAME LOOP DETECTED (sim={frame_sim:.2f})")
-                return True, ["Повторяющийся шаблон действий (каркас)"]
-
-    # 2. Поиск повторяющихся длинных фраз (клише)
-    def extract_clauses(text: str) -> set[str]:
-        clauses = re.findall(r'[^.,!?;—\-]{20,60}', text.lower())
-        return set(c.strip() for c in clauses if len(c.strip().split()) >= 4)
-
-    new_clauses = extract_clauses(new_response)
-    for old_msg in window:
-        old_clauses = extract_clauses(old_msg)
-        common_clauses = new_clauses & old_clauses
-        if len(common_clauses) >= 3:
-            bad_phrases.update(common_clauses)
-
-    # 3. Проверка на повторяющиеся вопросы в конце
-    new_ends_q = new_response.strip().endswith('?')
-    if new_ends_q:
-        for old_msg in window:
-            if old_msg.strip().endswith('?'):
-                new_q = re.search(r'(.{15,40})\?$', new_response.strip())
-                old_q = re.search(r'(.{15,40})\?$', old_msg.strip())
-                if new_q and old_q:
-                    q_sim = SequenceMatcher(None, new_q.group(1).lower(), old_q.group(1).lower()).ratio()
-                    if q_sim > 0.85:
-                        logger.warning("🚨 REPEATING QUESTION PATTERN.")
-                        return True, ["Повторяющийся вопрос в конце сообщения"]
-
-    # 4. Проверка действий в *звездочках*
-    new_actions = re.findall(r'\*([^*]+)\*', new_response)
+    new_actions = extract_actions(new_response)
     if new_actions:
-        for old_msg in window:
-            old_actions = re.findall(r'\*([^*]+)\*', old_msg)
-            for new_act in new_actions:
-                for old_act in old_actions:
-                    if len(new_act) > 8 and len(old_act) > 8:
-                        act_sim = SequenceMatcher(None, new_act.lower(), old_act.lower()).ratio()
-                        if act_sim > 0.85:
-                            logger.warning(f"🚨 ACTION PHRASE LOOP: '{new_act}' ~ '{old_act}'")
-                            return True, [f"Повтор действия: {new_act[:30]}..."]
+        for old_msg in recent_assistant_msgs[-3:]:
+            old_actions = extract_actions(old_msg)
+            # Если 50%+ действий повторяются - это зацикливание
+            if old_actions and len(new_actions & old_actions) / len(new_actions) > 0.5:
+                logger.warning(f"🚨 ACTION LOOP DETECTED: {new_actions & old_actions}")
+                return True, ["Повторяющиеся действия в звездочках"]
 
-    # 🆕 ЗАЩИТА ОТ ЛОЖНЫХ ТРЕВОГ (ЭХО ПОЛЬЗОВАТЕЛЯ)
-    if bad_phrases and last_user_msg:
-        last_user_lower = last_user_msg.lower()
-        is_just_echo = any(phrase in last_user_lower for phrase in bad_phrases)
-        if is_just_echo:
-            logger.info("✅ [DEBUG] False positive avoided: Bot is echoing user's premise.")
-            return False, []
+    # 3. Зацикливание (3+ одинаковых ответа подряд)
+    if len(recent_assistant_msgs) >= 3:
+        last_3 = recent_assistant_msgs[-3:]
+        sims = [
+            SequenceMatcher(None, last_3[0], last_3[1]).ratio(),
+            SequenceMatcher(None, last_3[1], last_3[2]).ratio(),
+        ]
+        if all(s > 0.80 for s in sims):
+            logger.warning("🚨 LOOP DETECTED: 3+ similar responses in a row")
+            return True, ["Зацикливание: 3+ похожих ответа подряд"]
 
-    if bad_phrases:
-        logger.warning(f"🚨 CLICHE LOOP DETECTED! Shared phrases: {bad_phrases}")
-        return True, list(bad_phrases)
-
-    logger.info("✅ [DEBUG] Дубликатов не обнаружено.")
     return False, []
 
 
@@ -206,7 +163,7 @@ async def process_chat_task(
             model_override=getattr(task, 'model_name', None)
         )
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5) # Немного уменьшил задержку для отзывчивости
 
         messages = await build_llm_context(
             msg_repo=msg_repo, summary_repo=summary_repo,
@@ -247,18 +204,11 @@ async def process_chat_task(
             if _is_ai_refusal(candidate_answer):
                 logger.warning("🚫 AI SAFETY REFUSAL DETECTED! Asking model to retry in-character.")
 
-                for i in range(len(messages) - 1, -1, -1):
-                    if messages[i].get("role") == "assistant":
-                        messages.pop(i)
-                        break
-
                 messages.append({
                     "role": "system",
                     "content": (
-                        "[ТЫ ВЫШЛА ИЗ РОЛИ. Вернись в образ своего персонажа. "
-                        "Ответь на последнее действие пользователя в характере, "
-                        "мягко и естественно, без упоминания фильтров или ИИ. "
-                        "Будь лаконичной: 1-2 абзаца.]"
+                        "[Вернись в роль персонажа. Ответь на последнее действие пользователя в характере, "
+                        "кратко и естественно, продолжая сцену, без упоминания фильтров или ИИ.]"
                     )
                 })
 
@@ -274,7 +224,7 @@ async def process_chat_task(
                 except Exception:
                     pass
 
-                char_name = task.char_dict.get("name", "персонаж")
+                char_name = task.char_dict.get("name", "Персонаж")
                 answer = f"*{char_name} делает паузу и мягко меняет тему*"
                 is_real_answer = False
                 break
@@ -289,45 +239,17 @@ async def process_chat_task(
 
             if is_dup:
                 if attempt < MAX_REGEN_ATTEMPTS:
-                    logger.warning(
-                        f"🔄 Duplicate detected (attempt {attempt + 1}/{MAX_REGEN_ATTEMPTS}). Regenerating...")
-
-                    has_existing_warning = any(
-                        msg.get("role") == "system" and "ОБНАРУЖЕН ПОВТОР" in msg.get("content", "")
-                        for msg in messages
-                    )
-
-                    if not has_existing_warning:
-                        messages.append({
-                            "role": "system",
-                            "content": (
-                                f"[КРИТИЧЕСКИЙ СБОЙ: ТЫ ПОВТОРЯЕШЬСЯ]\n"
-                                f"Действие пользователя: '{_truncate(last_user_msg, 60)}'.\n"
-                                f"ЗАДАЧА: Полностью игнорируй свой предыдущий ответ. Придумай АБСОЛЮТНО НОВУЮ реакцию."
-                            )
-                        })
+                    logger.warning(f"🔄 Duplicate detected (attempt {attempt + 1}/{MAX_REGEN_ATTEMPTS}). Retrying with higher temperature...")
                     continue
                 else:
-                    # 🚨 FATAL LOOP: Просто добавляем жесткий системный приказ, НЕ удаляя историю
-                    logger.warning("🚨 FATAL LOOP: Model stuck. Forcing new emotion via system prompt.")
-
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "[КРИТИЧЕСКАЯ ОШИБКА: Ты повторяешь свои ответы.]\n"
-                            "ПОЛНОСТЬЮ ПРОИГНОРИРУЙ свой предыдущий ответ. Не ссылайся на него.\n"
-                            f"Последние слова пользователя: '{_truncate(last_user_msg, 100)}'\n"
-                            "ЗАДАЧА: Ответь совершенно с новой, неожиданной эмоцией. Будь краткой (1-2 предложения)."
-                        )
-                    })
-
-                    result = await llm.generate(messages, model_override=getattr(task, 'model_name', None))
-                    if result.success:
-                        answer = _clean_response(result.content)
-                        is_real_answer = True
+                    logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback without breaking context.")
+                    char_name = task.char_dict.get("name", "Персонаж")
+                    answer = f"*{char_name} внимательно слушает тебя, обдумывая твои слова, и выжидательно смотрит.*"
+                    is_real_answer = True
                     break
             else:
-                # Дубликата нет, принимаем ответ
+                # ВОТ ЭТОГО БЛОКА НЕ ХВАТАЛО!
+                # Если дубликатов нет, мы принимаем хороший ответ и прерываем цикл.
                 answer = candidate_answer
                 is_real_answer = True
                 logger.info("✅ Answer accepted (clean): '%s'", answer[:100])

@@ -48,6 +48,9 @@ pm2 save
 # Настроить автозапуск при загрузке системы
 pm2 startup
 
+Запуск в режиме разработки
+watchfiles "python -m app.main" app
+
 app/
 ├── main.py                    # Точка входа
 ├── config.py                  # Конфигурация
