@@ -11,21 +11,22 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# === НАСТРОЙКИ ПАМЯТИ (СБАЛАНСИРОВАННЫЕ) ===
-SUMMARY_TRIGGER = 20      # Суммаризируем каждые 20 сообщений (оптимально для RP)
-SUMMARY_KEEP_LAST = 10    # Оставляем 10 последних сообщений живыми
-HISTORY_WINDOW = 30       # Модель видит 30 последних сообщений
+# === НАСТРОЙКИ ПАМЯТИ (ОПТИМИЗИРОВАННЫЕ ДЛЯ RP) ===
+SUMMARY_TRIGGER = 20  # Суммаризируем каждые 20 сообщений
+SUMMARY_KEEP_LAST = 15  # 🔥 PUSHOK FIX: Оставляем 15 последних сообщений живыми (было 10)
+HISTORY_WINDOW = 40  # 🔥 PUSHOK FIX: Модель видит 40 последних сообщений (было 30)
 
 SUMMARY_SYSTEM_PROMPT = """Ты — системный архивариус. Твоя задача — обновлять краткое резюме диалога.
 
 ПРАВИЛА:
-1. МЕСТО: Если в диалоге произошла смена локации, ОБНОВИ это поле. Если нет — оставь прежнее.
-2. ФАКТЫ: Добавляй новые важные факты о пользователе или мире к существующим. Не удаляй старые, если они не опровергнуты.
-3. СОСТОЯНИЯ: Описывай текущие эмоции или ситуативные условия персонажа (например, "Даша нервничает", "Заказаны коктейли").
-4. ФОРМАТ ВЫВОДА (строго, без вступлений):
+1. МЕСТО (ПЕРВЫМ ДЕЛОМ): Всегда начинай резюме с явного указания текущей локации. Если локация не изменилась, повтори предыдущую.
+2. ФАКТЫ: Добавляй новые важные факты о пользователе или мире. ОБЯЗАТЕЛЬНО фиксируй конкретные предметы, одежду, подарки, имена. Не удаляй старые факты, если они не опровергнуты.
+3. СОСТОЯНИЯ: Описывай текущие эмоции или ситуативные условия персонажа.
+4. ЗАПРЕТ НА МИКРО-ПОВТОРЫ: НЕ пиши о повторяющихся мелких действиях (например, "постоянно смотрит в телефон"). Пиши только о глобальных изменениях.
+5. ФОРМАТ ВЫВОДА (строго, без вступлений):
+- МЕСТО: [Текущая локация ПРЯМО СЕЙЧАС — это первое поле!]
 - ДИНАМИКА: [1 предложение о развитии отношений].
-- МЕСТО: [Текущая локация ПРЯМО СЕЙЧАС].
-- ФАКТЫ: [Краткий список фактов о пользователе и мире].
+- ФАКТЫ: [Краткий список фактов о пользователе и мире, включая конкретные предметы и одежду].
 - ТЕКУЩИЕ СОСТОЯНИЯ: [Активные условия].
 - СОБЫТИЕ: [Что конкретно произошло в последних сообщениях, 1 предложение].
 """
@@ -87,13 +88,31 @@ async def maybe_generate_summary(
         logger.warning("⚠️ Summary rejected: garbage output or empty")
         return
 
+    # 🔥 PUSHOK FIX: Проверка качества саммари
+    if len(new_summary) < 100:
+        logger.warning("⚠️ Summary rejected: too short (less than 100 chars)")
+        return
+
+    if "МЕСТО:" not in new_summary.upper():
+        logger.warning("⚠️ Summary rejected: missing location anchor")
+        return
+
+    # Проверяем, что саммари содержит конкретные факты
+    fact_keywords = ["носит", "одежд", "подар", "имя", "зовут", "любит", "предпочит"]
+    has_concrete_facts = any(keyword in new_summary.lower() for keyword in fact_keywords)
+    if not has_concrete_facts and len(new_summary) < 300:
+        logger.warning("⚠️ Summary rejected: too abstract, no concrete facts")
+        return
+
     last_message_id = messages_for_summary[-1]["id"]
     await summary_repo.save_summary(user_id, character_id, new_summary, last_message_id)
 
-    keep_messages = await msg_repo.get_recent_history(user_id, character_id, limit=SUMMARY_KEEP_LAST)
+    # 🔥 PUSHOK FIX: Удаляем только очень старые сообщения, оставляя больше живых
+    keep_messages = await msg_repo.get_recent_history(user_id, character_id, limit=20)
     if keep_messages:
         cutoff_id = keep_messages[0]["id"]
         await msg_repo.delete_old_messages(user_id, character_id, before_message_id=cutoff_id)
+        logger.info(f"🧹 Cleaned old messages, kept last 20 alive")
 
 
 async def build_llm_context(
@@ -150,8 +169,5 @@ async def build_llm_context(
         current_chars += msg_len
 
     messages.extend(trimmed_history)
-
-    # 🚨 ЗДЕСЬ БЫЛ УДАЛЕН ВЕСЬ БЛОК _check_history_degradation И КРИТИЧЕСКИЙ ЯКОРЬ ЛОКАЦИИ.
-    # Они вызывали противоречия и отказы модели. Контекст теперь чистый.
 
     return messages

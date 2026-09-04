@@ -30,6 +30,11 @@ def create_llm_client(session: aiohttp.ClientSession) -> LLMBase:
         logger.info("🏭 Creating LLMPolza client")
         return LLMPolza(session)
 
+    elif provider == "routerai":
+        from app.services.llm.routerai import LLMRouterAI
+        logger.info("🏭 Creating LLMRouterAI client (Cydonia fallback ready)")
+        return LLMRouterAI(session)
+
     elif provider == "vsegpt":
         from app.services.llm.vsegpt import LLMVseGPT
         logger.info("🏭 Creating LLMVseGPT client (Qwen/EVA ready)")

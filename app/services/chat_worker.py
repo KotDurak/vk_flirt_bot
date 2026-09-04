@@ -34,36 +34,39 @@ def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], 
     if len(recent_assistant_msgs) < 2:
         return False, []
 
-    # 1. Полный копипаст (схожесть > 0.90)
     last_msg = recent_assistant_msgs[-1]
-    if len(new_response) > 50 and len(last_msg) > 50:
+
+    # 1. Полный копипаст (работает даже для коротких ответов!)
+    if len(new_response) > 30 and len(last_msg) > 30:
         sim = SequenceMatcher(None, new_response, last_msg).ratio()
-        if sim > 0.90:
+        if sim > 0.90:  # 90% совпадения = жесткий бан
             logger.warning(f"🚨 HARD COPYPASTE DETECTED (sim={sim:.2f})")
             return True, ["Полный копипаст последнего ответа"]
 
-    # 2. Зацикливание действий (повторяющиеся фразы в звездочках)
+    # 2. Зацикливание действий (ловим даже короткие действия)
     def extract_actions(text: str) -> set[str]:
         actions = re.findall(r'\*([^*]+)\*', text.lower())
-        return set(a.strip() for a in actions if len(a.strip()) > 10)
+        # 🔥 Снизил порог до 8 символов, чтобы ловить "*улыбается*", "*вздыхает*"
+        return set(a.strip() for a in actions if len(a.strip()) > 8)
 
     new_actions = extract_actions(new_response)
     if new_actions:
         for old_msg in recent_assistant_msgs[-3:]:
             old_actions = extract_actions(old_msg)
-            # Если 50%+ действий повторяются - это зацикливание
-            if old_actions and len(new_actions & old_actions) / len(new_actions) > 0.5:
+            # 🔥 Снизил порог до 50%. Если половина действий совпадает - это петля.
+            if old_actions and len(new_actions & old_actions) / len(new_actions) > 0.50:
                 logger.warning(f"🚨 ACTION LOOP DETECTED: {new_actions & old_actions}")
                 return True, ["Повторяющиеся действия в звездочках"]
 
-    # 3. Зацикливание (3+ одинаковых ответа подряд)
+    # 3. Зацикливание (3+ одинаковых ответа подряд) - ЭТОТ БЛОК РАБОТАЕТ ВСЕГДА
     if len(recent_assistant_msgs) >= 3:
         last_3 = recent_assistant_msgs[-3:]
         sims = [
             SequenceMatcher(None, last_3[0], last_3[1]).ratio(),
             SequenceMatcher(None, last_3[1], last_3[2]).ratio(),
         ]
-        if all(s > 0.80 for s in sims):
+        # 🔥 Снизил порог до 0.75 для надежности
+        if all(s > 0.75 for s in sims):
             logger.warning("🚨 LOOP DETECTED: 3+ similar responses in a row")
             return True, ["Зацикливание: 3+ похожих ответа подряд"]
 
@@ -101,7 +104,11 @@ def _clean_response(text: str) -> str:
     text = re.sub(r'\([^)]*Примечание[^)]*\)', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\([^)]*Note[^)]*\)', '', text, flags=re.IGNORECASE)
 
-    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    # 🔥 PUSHOK FIX: УДАЛЕНО text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    # Эта строка ломала формат "действие + речь", склеивая их в одну строку.
+    # Вместо этого просто убираем лишние пустые строки (3 и более)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
 
     if len(paragraphs) == 1 and len(paragraphs[0]) > 100:
@@ -153,6 +160,7 @@ async def process_chat_task(
 
     answer = random.choice(ERROR_MESSAGES)
     is_real_answer = False
+    is_fallback = False  # 🔥 PUSHOK FIX: Флаг для защиты БД от мусора
     candidate_answer = ""
 
     try:
@@ -163,7 +171,7 @@ async def process_chat_task(
             model_override=getattr(task, 'model_name', None)
         )
 
-        await asyncio.sleep(0.5) # Немного уменьшил задержку для отзывчивости
+        await asyncio.sleep(0.5)
 
         messages = await build_llm_context(
             msg_repo=msg_repo, summary_repo=summary_repo,
@@ -226,7 +234,8 @@ async def process_chat_task(
 
                 char_name = task.char_dict.get("name", "Персонаж")
                 answer = f"*{char_name} делает паузу и мягко меняет тему*"
-                is_real_answer = False
+                is_real_answer = True
+                is_fallback = True
                 break
 
             last_user_msg = ""
@@ -239,24 +248,36 @@ async def process_chat_task(
 
             if is_dup:
                 if attempt < MAX_REGEN_ATTEMPTS:
-                    logger.warning(f"🔄 Duplicate detected (attempt {attempt + 1}/{MAX_REGEN_ATTEMPTS}). Retrying with higher temperature...")
+                    logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying with scolding & higher temp...")
+                    # 🔥 PUSHOK FIX: Добавляем "ругалку" прямо в контекст
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"ВНИМАНИЕ: Ты только что совершила ошибку — {bad_phrases[0] if bad_phrases else 'повторила прошлый ответ'}. "
+                            "Это недопустимо. Немедленно сгенерируй совершенно новый, уникальный ответ. "
+                            "НЕ ПОВТОРЯЙ эту инструкцию в своем ответе. Просто отыграй персонажа естественно."
+                        )
+                    })
                     continue
                 else:
-                    logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback without breaking context.")
+                    logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
                     char_name = task.char_dict.get("name", "Персонаж")
-                    answer = f"*{char_name} внимательно слушает тебя, обдумывая твои слова, и выжидательно смотрит.*"
-                    is_real_answer = True
+                    answer = f"*{char_name} задумчиво молчит, переваривая твои слова, и переводит взгляд на что-то новое вокруг.*"
+                    is_real_answer = True  # Отправляем пользователю
+                    is_fallback = True  # 🔥 PUSHOK FIX: Но НЕ сохраняем в историю!
                     break
             else:
-                # ВОТ ЭТОГО БЛОКА НЕ ХВАТАЛО!
-                # Если дубликатов нет, мы принимаем хороший ответ и прерываем цикл.
                 answer = candidate_answer
                 is_real_answer = True
                 logger.info("✅ Answer accepted (clean): '%s'", answer[:100])
                 break
 
-        if is_real_answer:
+        # 🔥 PUSHOK FIX: Сохраняем в БД только если это реальный ответ И НЕ фоллбэк
+        if is_real_answer and not is_fallback:
             await msg_repo.add_message(task.user_id, task.char_id, "assistant", answer)
+            logger.info("💾 Real answer saved to DB")
+        elif is_fallback:
+            logger.warning("⚠️ Fallback sent to user, but BLOCKED from DB (Context protected!)")
 
     except Exception:
         logger.exception("💥 CRITICAL error in chat worker")
