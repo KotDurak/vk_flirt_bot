@@ -121,7 +121,8 @@ class LLMRouterAI(LLMBase):
                         result = LLMResult(success=True, content=content.strip())
 
                         # 2. Теперь безопасно логируем (передаем строку content и dict usage)
-                        self.log(messages, target_model, payload, content, usage)
+                        if logger.isEnabledFor(logging.INFO):
+                            self.log(messages, target_model, payload, content, usage)
 
                         logger.info(
                             "✅ RouterAI response: finish_reason=%s, chars=%d",
