@@ -39,11 +39,34 @@ class LLMRouterAI(LLMBase):
             max_retries: int = 2,
             model_override: str | None = None
     ) -> LLMResult:
-        # По умолчанию используем Cydonia на RouterAI, если не передано иное
-        target_model = model_override or getattr(self._settings, 'routerai_model', 'thedrummer/cydonia-24b-v4.1')
+        # Основная модель или override
+        primary_model = model_override or getattr(self._settings, 'model', 'qwen/qwen-2.5-72b-instruct')
 
+        # 🔥 Fallback модель из конфига
+        fallback_model = getattr(self._settings, 'fallback_model', 'nousresearch/hermes-3-llama-3.1-70b')
+
+        # Пробуем основную модель
+        result = await self._try_generate(messages, primary_model, max_retries)
+
+        # Если основная упала с критической ошибкой — пробуем fallback
+        if not result.success and result.error_code in [429, 400, 200]:  # 200 = empty choices
+            logger.warning(f"⚠️ Primary model {primary_model} failed. Switching to fallback: {fallback_model}")
+            result = await self._try_generate(messages, fallback_model, max_retries, is_fallback=True)
+
+        return result
+
+    async def _try_generate(
+            self,
+            messages: list[dict[str, str]],
+            target_model: str,
+            max_retries: int,
+            is_fallback: bool = False
+    ) -> LLMResult:
+        """Внутренний метод для попытки генерации с конкретной моделью."""
+
+        prefix = "🔄 FALLBACK" if is_fallback else "🚀"
         logger.info(
-            "🚀 RouterAI request: model=%s, msgs=%d, tokens≈%d",
+            f"{prefix} RouterAI request: model=%s, msgs=%d, tokens≈%d",
             target_model,
             len(messages),
             self._count_tokens_approx(messages)
@@ -59,27 +82,13 @@ class LLMRouterAI(LLMBase):
             "model": target_model,
             "messages": messages,
             "max_tokens": self._settings.max_tokens,
-            "temperature": 0.85,  # Оставляем, отлично для креатива
-            "top_p": 0.95,  # Чуть приподнимем, так как min_p сам отрежет хвосты
-            "min_p": 0.05,  # 🔥 Оставляем! Отличный фильтр галлюцинаций.
-
-            # --- ИСПРАВЛЕННАЯ ЗАЩИТА ОТ ПЕТЛЬ ---
-            "repetition_penalty": 1.15,  # 🔥 Чуть повышаем (было 1.12).
-            # Именно этот параметр (если бэкенд его поддерживает, например vLLM)
-            # наказывает за повторение ПОДРЯД ИДУЩИХ n-грамм. Он спасает от
-            # "Ты... ты правда?" и "*вздыхает* ... *вздыхает*".
-
-            # --- УБИРАЕМ БЕНЗОПИЛУ ---
-            "frequency_penalty": 0.1,  # 🔥 БЫЛО 1. Стало 0.1.
-            # Легкий штраф только для ОЧЕНЬ частых слов-паразитов (типа "ну", "вот").
-
-            "presence_penalty": 0.05,  # 🔥 БЫЛО 0.6. Стало 0.
-            # В RP нам НЕ НУЖНО, чтобы бот постоянно менял тему.
-            # Пусть спокойно продолжает описывать поцелуй или комнату!
-
+            "temperature": 0.85,
+            "top_p": 0.95,
+            "min_p": 0.05,
+            "repetition_penalty": 1.15,
+            "frequency_penalty": 0.1,
+            "presence_penalty": 0.05,
             "stop": ["P.S", "@id", "User:", "Пользователь:", "[СИСТЕМА", "[SYSTEM"],
-            # Совет: если бот иногда пишет за тебя, добавь в stop имя твоего персонажа с двоеточием (например, "Алексей:").
-
             "safe_prompt": False
         }
 
@@ -93,7 +102,7 @@ class LLMRouterAI(LLMBase):
             try:
                 async with self._session.post(
                         url, json=payload, headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=120)  # 2 минуты на ответ
+                        timeout=aiohttp.ClientTimeout(total=120)
                 ) as response:
                     body = await response.text()
                     if response.status == 200:
@@ -101,7 +110,7 @@ class LLMRouterAI(LLMBase):
 
                         data = json.loads(body)
                         choices = data.get("choices", [])
-                        usage = data.get("usage", {})  # 🔥 Забираем статистику токенов
+                        usage = data.get("usage", {})
 
                         if not choices:
                             logger.warning(f"⚠️ Empty choices! Full response: {body[:1000]}")
@@ -113,14 +122,12 @@ class LLMRouterAI(LLMBase):
                                 error_message="Empty choices - likely hit stop token or filtered"
                             )
 
-                        # 🔥 ИЗВЛЕКАЕМ ДАННЫЕ ПЕРЕД ЛОГИРОВАНИЕМ
                         content = choices[0].get("message", {}).get("content", "")
                         finish_reason = choices[0].get("finish_reason")
 
-                        # 1. Сначала создаем результат
                         result = LLMResult(success=True, content=content.strip())
 
-                        # 2. Теперь безопасно логируем (передаем строку content и dict usage)
+                        # 🔥 Логируем только если уровень INFO
                         if logger.isEnabledFor(logging.INFO):
                             self.log(messages, target_model, payload, content, usage)
 
@@ -132,7 +139,6 @@ class LLMRouterAI(LLMBase):
                         if finish_reason == "length":
                             logger.warning("⚠️ Response cut off by max_tokens!")
 
-                        # 3. Возвращаем результат
                         return result
 
                     # Обработка Rate Limit (429)
@@ -148,7 +154,7 @@ class LLMRouterAI(LLMBase):
                             return LLMResult(success=False, error_code=429,
                                              error_message="Rate limit exceeded, cooldown activated")
 
-                        wait_time = 15.0  # Чуть меньше ждать, чем у Polza
+                        wait_time = 15.0
                         logger.warning("RouterAI API 429 (attempt %d/%d). Waiting %.1fs...", attempt + 1, max_retries,
                                        wait_time)
                         await asyncio.sleep(wait_time)

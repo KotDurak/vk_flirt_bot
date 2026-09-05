@@ -55,6 +55,7 @@ class LLMSettings(BaseSettings):
     routerai_model: str = "nousresearch/hermes-3-llama-3.1-70b"
 
     model_summary: str = "nousresearch/hermes-3-llama-3.1-70b"
+    fallback_model: str = "nousresearch/hermes-3-llama-3.1-70b"
 
     max_tokens: int = 800
     temperature: float = 0.85  # 🔥 Безопасный баланс креатива и контроля
