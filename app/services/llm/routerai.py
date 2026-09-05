@@ -30,8 +30,8 @@ class LLMRouterAI(LLMBase):
 
         # 🔥 PUSHOK FIX: Используем настройки RouterAI, если они есть в конфиге,
         # иначе берем дефолтные, но с правильным базовым URL
-        self.base_url = getattr(self._settings, 'routerai_base_url', 'https://routerai.ru/v1')
-        self.api_key = getattr(self._settings, 'routerai_api_key', self._settings.api_key)
+        self.base_url = getattr(self._settings, 'base_url', 'https://routerai.ru/api/v1')
+        self.api_key = getattr(self._settings, 'api_key', self._settings.api_key)
 
     async def generate(
             self,
@@ -55,31 +55,31 @@ class LLMRouterAI(LLMBase):
             "Content-Type": "application/json",
         }
 
-        # 🔥 PUSHOK FIX: Идеальный сэмплинг для Cydonia 24B / Mistral-based RP
         payload = {
             "model": target_model,
             "messages": messages,
-            "max_tokens": self._settings.max_tokens,  # 450 из конфига
-            "temperature": 0.85,  # Баланс креатива и контроля
+            "max_tokens": self._settings.max_tokens,
+            "temperature": 0.85,  # Оставляем, отлично для креатива
+            "top_p": 0.95,  # Чуть приподнимем, так как min_p сам отрежет хвосты
+            "min_p": 0.05,  # 🔥 Оставляем! Отличный фильтр галлюцинаций.
 
-            # --- СТАНДАРТНАЯ ЗАЩИТА ---
-            "top_p": 0.9,
-            "frequency_penalty": 1,  # Штрафует частые слова (молоток Барсика)
-            "presence_penalty": 0.6,  # Поощряет новые темы (нюх Барсика)
+            # --- ИСПРАВЛЕННАЯ ЗАЩИТА ОТ ПЕТЛЬ ---
+            "repetition_penalty": 1.15,  # 🔥 Чуть повышаем (было 1.12).
+            # Именно этот параметр (если бэкенд его поддерживает, например vLLM)
+            # наказывает за повторение ПОДРЯД ИДУЩИХ n-грамм. Он спасает от
+            # "Ты... ты правда?" и "*вздыхает* ... *вздыхает*".
 
-            # --- СЕКРЕТНОЕ ОРУЖИЕ ДЛЯ MISTRAL/CYDONIA ---
-            "repetition_penalty": 1.12,  # 🔥 КРИТИЧЕСКИ ВАЖНО!
-            # В отличие от frequency_penalty, это напрямую
-            # множит вероятность токена, если он уже был.
-            # 1.12 - это "золотая середина": ломает петли
-            # "Ты... ты правда?", но не ломает грамматику.
+            # --- УБИРАЕМ БЕНЗОПИЛУ ---
+            "frequency_penalty": 0.1,  # 🔥 БЫЛО 1. Стало 0.1.
+            # Легкий штраф только для ОЧЕНЬ частых слов-паразитов (типа "ну", "вот").
 
-            "min_p": 0.05,  # 🔥 Динамический фильтр мусора.
-            # Гораздо лучше, чем Top-K. Если модель уверена
-            # в хорошем, но нестандартном слове, min_p его
-            # пропустит. Но абсолютный бред отрежет.
+            "presence_penalty": 0.05,  # 🔥 БЫЛО 0.6. Стало 0.
+            # В RP нам НЕ НУЖНО, чтобы бот постоянно менял тему.
+            # Пусть спокойно продолжает описывать поцелуй или комнату!
 
-            "stop": ["P.S", "@id", "User:"],
+            "stop": ["P.S", "@id", "User:", "Пользователь:", "[СИСТЕМА", "[SYSTEM"],
+            # Совет: если бот иногда пишет за тебя, добавь в stop имя твоего персонажа с двоеточием (например, "Алексей:").
+
             "safe_prompt": False
         }
 
@@ -97,29 +97,31 @@ class LLMRouterAI(LLMBase):
                 ) as response:
                     body = await response.text()
                     if response.status == 200:
-                        # 🔥 PUSHOK FIX: Расширенное логирование для отладки
-                        logger.debug(f"📥 ROUTERAI RAW RESPONSE:\n{body[:500]}")  # Первые 500 символов
+                        logger.debug(f"📥 ROUTERAI RAW RESPONSE:\n{body[:500]}")
 
                         data = json.loads(body)
                         choices = data.get("choices", [])
+                        usage = data.get("usage", {})  # 🔥 Забираем статистику токенов
 
                         if not choices:
-                            # 🔥 PUSHOK FIX: Логируем полный ответ, чтобы понять причину
                             logger.warning(f"⚠️ Empty choices! Full response: {body[:1000]}")
-
-                            # Проверяем, есть ли причина в ответе (например, finish_reason)
                             if "error" in data:
                                 logger.error(f"🚨 API Error in response: {data['error']}")
-
-                            # Возвращаем ошибку, чтобы chat_worker мог сделать ретрай
                             return LLMResult(
                                 success=False,
-                                error_code=200,  # Статус был 200, но ответа нет
+                                error_code=200,
                                 error_message="Empty choices - likely hit stop token or filtered"
                             )
 
-                        finish_reason = choices[0].get("finish_reason")
+                        # 🔥 ИЗВЛЕКАЕМ ДАННЫЕ ПЕРЕД ЛОГИРОВАНИЕМ
                         content = choices[0].get("message", {}).get("content", "")
+                        finish_reason = choices[0].get("finish_reason")
+
+                        # 1. Сначала создаем результат
+                        result = LLMResult(success=True, content=content.strip())
+
+                        # 2. Теперь безопасно логируем (передаем строку content и dict usage)
+                        self.log(messages, target_model, payload, content, usage)
 
                         logger.info(
                             "✅ RouterAI response: finish_reason=%s, chars=%d",
@@ -129,10 +131,8 @@ class LLMRouterAI(LLMBase):
                         if finish_reason == "length":
                             logger.warning("⚠️ Response cut off by max_tokens!")
 
-                        if finish_reason == "stop":
-                            logger.debug(f"🛑 Stopped by token. Content length: {len(content)}")
-
-                        return LLMResult(success=True, content=content.strip())
+                        # 3. Возвращаем результат
+                        return result
 
                     # Обработка Rate Limit (429)
                     if response.status == 429:

@@ -11,36 +11,24 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# === НАСТРОЙКИ ПАМЯТИ (ОПТИМИЗИРОВАННЫЕ ДЛЯ RP) ===
-SUMMARY_TRIGGER = 20  # Суммаризируем каждые 20 сообщений
-SUMMARY_KEEP_LAST = 15  # 🔥 PUSHOK FIX: Оставляем 15 последних сообщений живыми (было 10)
-HISTORY_WINDOW = 40  # 🔥 PUSHOK FIX: Модель видит 40 последних сообщений (было 30)
+# === НАСТРОЙКИ ПАМЯТИ (ЖЕСТКИЕ И ЭФФЕКТИВНЫЕ) ===
+SUMMARY_TRIGGER = 15  # Суммаризируем чаще, чтобы история не росла
+SUMMARY_KEEP_LAST = 10  # Оставляем 10 последних сообщений живыми
+HISTORY_WINDOW = 15  # 🔥 ИСПРАВЛЕНО: 15 сообщений максимум. Доверяй саммари!
 
-SUMMARY_SYSTEM_PROMPT = """Ты — системный архивариус. Твоя задача — обновлять краткое резюме диалога.
-
+SUMMARY_SYSTEM_PROMPT = """Ты — системный архивариус. Обновляй краткое резюме диалога.
 ПРАВИЛА:
-1. МЕСТО (ПЕРВЫМ ДЕЛОМ): Всегда начинай резюме с явного указания текущей локации. Если локация не изменилась, повтори предыдущую.
-2. ФАКТЫ: Добавляй новые важные факты о пользователе или мире. ОБЯЗАТЕЛЬНО фиксируй конкретные предметы, одежду, подарки, имена. Не удаляй старые факты, если они не опровергнуты.
-3. СОСТОЯНИЯ: Описывай текущие эмоции или ситуативные условия персонажа.
-4. ЗАПРЕТ НА МИКРО-ПОВТОРЫ: НЕ пиши о повторяющихся мелких действиях (например, "постоянно смотрит в телефон"). Пиши только о глобальных изменениях.
-5. ФОРМАТ ВЫВОДА (строго, без вступлений):
-- МЕСТО: [Текущая локация ПРЯМО СЕЙЧАС — это первое поле!]
-- ДИНАМИКА: [1 предложение о развитии отношений].
-- ФАКТЫ: [Краткий список фактов о пользователе и мире, включая конкретные предметы и одежду].
-- ТЕКУЩИЕ СОСТОЯНИЯ: [Активные условия].
-- СОБЫТИЕ: [Что конкретно произошло в последних сообщениях, 1 предложение].
+1. МЕСТО: Всегда начинай с текущей локации.
+2. ФАКТЫ: Фиксируй новые важные факты, предметы, имена, изменения в отношениях. Не удаляй старые, если не опровергнуты.
+3. СОСТОЯНИЯ: Эмоции или ситуативные условия персонажа.
+4. ФОРМАТ (строго):
+- МЕСТО: [Локация]
+- ДИНАМИКА: [1 предложение о развитии отношений]
+- ФАКТЫ: [Список ключевых фактов]
+- СОБЫТИЕ: [Что произошло в последних сообщениях, 1-2 предложения]
 """
 
-
-async def maybe_generate_summary(
-        session,
-        llm: LLMBase,
-        msg_repo: MessageRepository,
-        summary_repo: SummaryRepository,
-        user_id: int,
-        character_id: int,
-        model_override: str | None = None
-) -> None:
+async def maybe_generate_summary(session, llm: LLMBase, msg_repo: MessageRepository, summary_repo: SummaryRepository, user_id: int, character_id: int, model_override: str | None = None) -> None:
     current_summary = await summary_repo.get_summary(user_id, character_id)
     last_summarized_id = current_summary["last_summarized_message_id"] if current_summary else 0
 
@@ -57,7 +45,7 @@ async def maybe_generate_summary(
     if current_summary and current_summary["summary"]:
         dialogue_text += f"Предыдущее резюме:\n{current_summary['summary']}\n\n"
 
-    dialogue_text += "Новые сообщения диалога:\n"
+    dialogue_text += "Новые сообщения:\n"
     for msg in messages_for_summary:
         role_label = "Пользователь" if msg["role"] == "user" else "Персонаж"
         dialogue_text += f"{role_label}: {msg['content']}\n"
@@ -69,83 +57,63 @@ async def maybe_generate_summary(
 
     summary_settings = copy.deepcopy(get_llm_settings())
     summary_settings.model = model_override if model_override else summary_settings.model_summary
-    summary_settings.max_tokens = 1000
+    summary_settings.max_tokens = 500 # Саммари не должно быть длинным
 
     summary_llm = create_llm_client(session)
     summary_llm._settings = summary_settings
 
     result = await summary_llm.generate(messages)
-
     if not result.success:
         return
 
     new_summary = result.content.strip()
 
-    latin_chars = len(re.findall(r'[a-zA-Z]', new_summary))
+    # 🔥 ИСПРАВЛЕНО: Мягкая, но надежная валидация
     cyrillic_chars = len(re.findall(r'[а-яА-ЯёЁ]', new_summary))
-
-    if latin_chars > cyrillic_chars or not new_summary:
-        logger.warning("⚠️ Summary rejected: garbage output or empty")
-        return
-
-    # 🔥 PUSHOK FIX: Проверка качества саммари
-    if len(new_summary) < 100:
-        logger.warning("⚠️ Summary rejected: too short (less than 100 chars)")
+    if cyrillic_chars < 50 or len(new_summary) < 80:
+        logger.warning("⚠️ Summary rejected: too short or no cyrillic")
         return
 
     if "МЕСТО:" not in new_summary.upper():
         logger.warning("⚠️ Summary rejected: missing location anchor")
         return
 
-    # Проверяем, что саммари содержит конкретные факты
-    fact_keywords = ["носит", "одежд", "подар", "имя", "зовут", "любит", "предпочит"]
-    has_concrete_facts = any(keyword in new_summary.lower() for keyword in fact_keywords)
-    if not has_concrete_facts and len(new_summary) < 300:
-        logger.warning("⚠️ Summary rejected: too abstract, no concrete facts")
-        return
-
     last_message_id = messages_for_summary[-1]["id"]
     await summary_repo.save_summary(user_id, character_id, new_summary, last_message_id)
+    logger.info(f"✅ Summary saved up to message {last_message_id}")
 
-    # 🔥 PUSHOK FIX: Удаляем только очень старые сообщения, оставляя больше живых
-    keep_messages = await msg_repo.get_recent_history(user_id, character_id, limit=20)
+    # Чистим старые сообщения, оставляя только последние живые
+    keep_messages = await msg_repo.get_recent_history(user_id, character_id, limit=SUMMARY_KEEP_LAST)
     if keep_messages:
         cutoff_id = keep_messages[0]["id"]
         await msg_repo.delete_old_messages(user_id, character_id, before_message_id=cutoff_id)
-        logger.info(f"🧹 Cleaned old messages, kept last 20 alive")
+        logger.info(f"🧹 Cleaned old messages, kept last {SUMMARY_KEEP_LAST} alive")
 
 
-async def build_llm_context(
-        msg_repo: MessageRepository,
-        summary_repo: SummaryRepository,
-        user_id: int,
-        character_id: int,
-        system_prompt: str,
-) -> list[dict]:
+async def build_llm_context(msg_repo: MessageRepository, summary_repo: SummaryRepository, user_id: int, character_id: int, system_prompt: str) -> list[dict]:
     system_content = system_prompt
 
     summary_data = await summary_repo.get_summary(user_id, character_id)
     last_summarized_id = summary_data["last_summarized_message_id"] if summary_data else 0
 
-    # 1. Добавляем саммари, если оно есть
     if summary_data and summary_data["summary"]:
         system_content += (
             "\n\n<MEMORY_CONTEXT>\n"
-            "КРАТКАЯ ВЫЖИМКА ПРОШЛЫХ СОБЫТИЙ (Используй для логики, не цитируй):\n"
+            "КРАТКАЯ ВЫЖИМКА ПРОШЛЫХ СОБЫТИЙ (Используй для логики, не цитируй напрямую):\n"
             f"{summary_data['summary']}\n"
             "</MEMORY_CONTEXT>"
         )
 
     messages = [{"role": "system", "content": system_content}]
 
-    # 2. Загружаем историю
+    # 🔥 ИСПРАВЛЕНО: Берем строго последние HISTORY_WINDOW сообщений ПОСЛЕ последнего саммари
     history = await msg_repo.get_recent_history(
         user_id, character_id,
         limit=HISTORY_WINDOW,
         after_message_id=last_summarized_id
     )
 
-    # 3. Простая дедупликация (убираем только полные дубликаты подряд)
+    # Простая дедупликация полных совпадений
     deduplicated = []
     for msg in history:
         if not deduplicated:
@@ -156,18 +124,5 @@ async def build_llm_context(
             continue
         deduplicated.append(msg)
 
-    # 4. Ограничение по символам (защита от переполнения контекста)
-    MAX_HISTORY_CHARS = 32000
-    current_chars = len(system_content)
-    trimmed_history = []
-
-    for msg in reversed(deduplicated):
-        msg_len = len(str(msg.get("content", "")))
-        if current_chars + msg_len > MAX_HISTORY_CHARS:
-            break
-        trimmed_history.insert(0, msg)
-        current_chars += msg_len
-
-    messages.extend(trimmed_history)
-
+    messages.extend(deduplicated)
     return messages

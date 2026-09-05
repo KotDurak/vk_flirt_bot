@@ -3,6 +3,7 @@ import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import app.models_list
 
+
 class Settings(BaseSettings):
     group_token: str
     group_id: int
@@ -10,7 +11,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     longpoll_wait: int = 25
     db_path: str = "data/bot.db"
-    llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
+
+    # Pydantic будет искать VK_BOT_LLM_PROVIDER (или просто оставь дефолт)
+    llm_provider: str = "polza"
+
     payment_provider: str = "test"
     yookassa_shop_id: str = ""
     yookassa_secret_key: str = ""
@@ -34,31 +38,31 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """
-    Возвращает настройки приложения.
-
-    Переменные окружения читаются с префиксом VK_BOT_:
-    - VK_BOT_GROUP_TOKEN
-    - VK_BOT_GROUP_ID
-    - VK_BOT_API_VERSION
-    - VK_BOT_LOG_LEVEL
-    - VK_BOT_LONGPOLL_WAIT
-    """
     return Settings()
 
-# app/config.py
-
-# ... (импорты и класс Settings остаются)
 
 class LLMSettings(BaseSettings):
+    # 🔥 ЕДИНЫЙ КЛЮЧ ДЛЯ ВСЕХ ПРОВАЙДЕРОВ
     api_key: str
+
+    # Дефолты для Polza
     base_url: str = "https://api.polza.ai/v1"
     model: str = "thedrummer/skyfall-36b-v2"
     model_sfw: str = "meta-llama/llama-3.1-70b-instruct"
+
+    # Дефолты для RouterAI (наша золотая середина)
+    routerai_base_url: str = "https://routerai.ru/v1"
+    routerai_model: str = "nousresearch/hermes-3-llama-3.1-70b"
+
+    model_summary: str = "nousresearch/hermes-3-llama-3.1-70b"
+
     max_tokens: int = 800
-    temperature: float = 1.1
-    llm_provider: str = os.getenv("LLM_PROVIDER", "polza")
-    model_summary: str = "sao10k/l3.3-euryale-70b"
+    temperature: float = 0.85  # 🔥 Безопасный баланс креатива и контроля
+
+    # 🔥 КРИТИЧЕСКИ ВАЖНО: Поле называется 'provider',
+    # чтобы Pydantic с префиксом 'LLM_' искал в .env именно 'LLM_PROVIDER',
+    # а не 'LLM_LLM_PROVIDER'.
+    provider: str = "polza"
 
     model_config = SettingsConfigDict(
         env_prefix="LLM_",

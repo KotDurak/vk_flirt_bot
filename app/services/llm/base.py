@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import json
+from datetime import datetime
+from pathlib import Path
 
 import aiohttp
 
@@ -54,3 +57,30 @@ class LLMBase(ABC):
         """Грубая оценка количества токенов (1 токен ≈ 4 символа)."""
         total_chars = sum(len(m.get("content", "")) for m in messages)
         return total_chars // 4
+
+    def log(self, messages: list, target_model: str, payload: dict, content: str, usage: dict) -> None:
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "model": target_model,
+            "messages": messages,
+            "settings": {
+                "temperature": payload.get("temperature"),
+                "repetition_penalty": payload.get("repetition_penalty"),
+                "frequency_penalty": payload.get("frequency_penalty"),
+                "presence_penalty": payload.get("presence_penalty"),
+                "min_p": payload.get("min_p"),
+            },
+            "response": content,
+            "tokens_in": usage.get("prompt_tokens") if usage else None,
+            "tokens_out": usage.get("completion_tokens") if usage else None,
+        }
+
+        log_dir = Path("logs/llm_requests")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{datetime.now().strftime('%Y-%m-%d')}_requests.jsonl"
+
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"❌ Failed to write log: {e}")
