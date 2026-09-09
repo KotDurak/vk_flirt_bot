@@ -37,7 +37,7 @@ def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], 
     # 1. Полный копипаст
     if len(new_response) > 30 and len(last_msg) > 30:
         sim = SequenceMatcher(None, new_response, last_msg).ratio()
-        if sim > 0.90:
+        if sim > 0.85:
             logger.warning(f"🚨 HARD COPYPASTE DETECTED (sim={sim:.2f})")
             return True, ["Полный копипаст последнего ответа"]
 
@@ -54,22 +54,10 @@ def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], 
                 logger.warning(f"🚨 ACTION LOOP DETECTED: {new_actions & old_actions}")
                 return True, ["Повторяющиеся действия в звездочках"]
 
-    # 3. Зацикливание (3+ похожих ответа подряд)
-    if len(recent_assistant_msgs) >= 3:
-        last_3 = recent_assistant_msgs[-3:]
-        sims = [
-            SequenceMatcher(None, last_3[0], last_3[1]).ratio(),
-            SequenceMatcher(None, last_3[1], last_3[2]).ratio(),
-        ]
-        if all(s > 0.75 for s in sims):
-            logger.warning("🚨 LOOP DETECTED: 3+ similar responses in a row")
-            return True, ["Зацикливание: 3+ похожих ответа подряд"]
-
     return False, []
 
 
 def _clean_response(text: str) -> str:
-    """Убирает системный мусор, предотвращает создание вертикальных простынь текста."""
     if not text:
         return ""
 
@@ -161,31 +149,39 @@ async def process_chat_task(
 
         await asyncio.sleep(0.5)
 
-        messages = await build_llm_context(
+        # Базовый контекст (НЕ ТРОГАЕМ ЕГО В ЦИКЛЕ)
+        base_messages = await build_llm_context(
             msg_repo=msg_repo, summary_repo=summary_repo,
             user_id=task.user_id, character_id=task.char_id,
             system_prompt=task.char_dict["system_prompt"],
         )
 
+        historical_assistant_msgs = [
+            msg["content"] for msg in base_messages if msg.get("role") == "assistant"
+        ]
+
         base_settings = getattr(llm, '_settings', None)
         base_temperature = getattr(base_settings, 'temperature', 0.8) if base_settings else 0.8
 
         for attempt in range(MAX_REGEN_ATTEMPTS + 1):
-            # 🔥 FIX 1: Получаем АКТУАЛЬНЫЙ список ответов ассистента на каждой итерации
-            current_assistant_msgs = [
-                msg["content"] for msg in messages if msg.get("role") == "assistant"
-            ]
+            # 🔥 БЕЗОПАСНО: Работаем с чистой копией на каждой итерации. Ничего не накапливается.
+            messages_to_send = copy.deepcopy(base_messages)
 
             if attempt > 0 and base_settings is not None:
-                increased_temp = min(base_temperature + 0.25, 1.15)
+                increased_temp = min(base_temperature + 0.3, 1.2)
                 logger.info(f"🌡️ Retry {attempt + 1}: Temp={increased_temp}")
                 new_settings = copy.deepcopy(base_settings)
                 new_settings.temperature = increased_temp
-                # 🔥 БЕЗОПАСНО: Убраны попытки установить repetition_penalty, чтобы не ронять Pydantic
                 llm._settings = new_settings
 
+                # 🔥 БЕЗОПАСНО: Добавляем короткую инструкцию в конец. Она имеет высший приоритет внимания.
+                messages_to_send.append({
+                    "role": "system",
+                    "content": "[OOC: Предыдущий ответ отклонен за структурное повторение. Сохраняя текущее настроение сцены и характер персонажа, опиши реакцию через новую, свежую деталь (положение тела, взаимодействие с предметом или тихое действие), избегая ранее использованных формулировок.]"
+                })
+
             try:
-                result = await llm.generate(messages, model_override=getattr(task, 'model_name', None))
+                result = await llm.generate(messages_to_send, model_override=getattr(task, 'model_name', None))
             finally:
                 if attempt > 0 and base_settings is not None:
                     llm._settings = base_settings
@@ -214,25 +210,11 @@ async def process_chat_task(
                 is_fallback = True
                 break
 
-            # 🔥 FIX 2: Проверяем дубликаты против актуального списка
-            is_dup, bad_phrases = _is_duplicate_response(candidate_answer, current_assistant_msgs, task.text)
+            is_dup, bad_phrases = _is_duplicate_response(candidate_answer, historical_assistant_msgs, task.text)
 
             if is_dup:
                 if attempt < MAX_REGEN_ATTEMPTS:
-                    logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying with mutated system prompt...")
-
-                    # 🔥 FIX 3: Временная мутация системного промпта вместо спама ролью "Director"
-                    for msg in messages:
-                        if msg["role"] == "system":
-                            original_system = msg["content"]
-                            msg["content"] = original_system + (
-                                "\n\n[КРИТИЧЕСКАЯ ОШИБКА ГЕНЕРАЦИИ: Твой предыдущий ответ был отклонен за повторение действий. "
-                                "В этой попытке ты ОБЯЗАН описать совершенно новую физическую реакцию. "
-                                "СТРОГО ЗАПРЕЩЕНО использовать слова: 'стонет', 'краснеет', 'дрожит', 'прижимается'. "
-                                "Смени позу, задай прямой вопрос или опиши окружающую обстановку.]"
-                            )
-                            break
-
+                    logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying...")
                     continue
                 else:
                     logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
