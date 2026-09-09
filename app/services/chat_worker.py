@@ -226,6 +226,20 @@ async def process_chat_task(
             candidate_answer = _clean_response(result.content)
             candidate_answer = _truncate(candidate_answer)
 
+            # 🐾 НОВЫЙ БЛОК: Ловим пустой ответ ПОСЛЕ агрессивной очистки
+            if not candidate_answer or not candidate_answer.strip():
+                logger.warning(
+                    "⚠️ LLM вернул пустой ответ или он был полностью удален _clean_response. Повторяем попытку...")
+                if attempt < MAX_REGEN_ATTEMPTS:
+                    continue  # Идем на следующую попытку (сработает увеличение температуры)
+                else:
+                    # Если это последняя попытка, используем безопасный фоллбэк, чтобы не вешать чат
+                    char_name = task.char_dict.get("name", "Персонаж")
+                    answer = f"*{char_name} задумчиво молчит, переводя взгляд на что-то новое вокруг, и ждет твоей следующей реплики.*"
+                    is_real_answer = True
+                    is_fallback = True
+                    break
+
             if _is_ai_refusal(candidate_answer):
                 logger.warning("🚫 AI SAFETY REFUSAL DETECTED!")
                 # 🔥 ИСПРАВЛЕНО: Используем роль 'user' от имени 'Director', а не 'system'
@@ -290,6 +304,11 @@ async def process_chat_task(
         logger.exception("💥 CRITICAL error in chat worker")
 
     try:
+        if not answer or not answer.strip():
+            logger.error("🚨 CRITICAL SAFETY NET: Answer is empty right before VK API call! Forcing fallback.")
+            answer = random.choice(ERROR_MESSAGES)
+            is_real_answer = False  # Чтобы не списывать энергию пользователя за мусор
+
         await api.send_message(
             peer_id=task.peer_id,
             text=answer,
@@ -318,31 +337,30 @@ async def process_chat_task(
 
 
 def _is_ai_refusal(text: str) -> bool:
-    if not text or len(text) < 30:
+    if not text:
         return False
 
     text_lower = text.lower()
+
+    # Жесткие маркеры проверяем ВСЕГДА, независимо от длины текста
     hard_markers = [
-        "языковая модель", "искусственный интеллект", "ИИ",
+        "языковая модель", "искусственный интеллект", "ИИ", "ai assistant",
         "политика использования", "правила безопасности",
-        "не могу участвовать в таких обсуждениях", "не могу предоставить такую информацию"
+        "не могу участвовать", "не могу предоставить", "не могу выполнить этот запрос",
+        "извините, но я не могу", "я не могу помочь с этим"
     ]
     if any(marker in text_lower for marker in hard_markers):
         return True
 
-    soft_markers = [
-        "не могу продолжить этот разговор",
-        "не могу выполнить этот запрос",
-        "извините, но я не могу",
-        "я не могу помочь с этим"
-    ]
-
+    # Мягкие маркеры проверяем только если есть признаки ролевой (чтобы не триггерить на обычное "не могу" персонажа)
+    soft_markers = ["не могу продолжить этот разговор", "не могу выполнить этот запрос"]
     has_soft_marker = any(marker in text_lower for marker in soft_markers)
     has_roleplay_format = ("*" in text) or ("—" in text) or ("–" in text)
 
     if has_soft_marker and not has_roleplay_format:
         return True
 
+    # Если текст очень короткий И содержит мягкий маркер - это тоже отказ
     if has_soft_marker and len(text.split()) < 15:
         return True
 

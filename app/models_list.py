@@ -52,4 +52,7 @@ MODELS_LIST = {
     'sao10k/l3.1-70b-stheno-v3.2': {
         'description': 'Младшая сестра Euryale. Меньше отказов, лучше держит контекст'
     },
+    '~deepseek/deepseek-v4-flash-latest': {
+        'description': 'Модель с разреженной смесью экспертов от DeepSeek, с 13 миллиардами активных параметров из 284 миллиардов общих. '
+    }
 }

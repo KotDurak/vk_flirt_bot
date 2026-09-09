@@ -49,8 +49,9 @@ class LLMRouterAI(LLMBase):
         result = await self._try_generate(messages, primary_model, max_retries)
 
         # Если основная упала с критической ошибкой — пробуем fallback
-        if not result.success and result.error_code in [429, 400, 200]:  # 200 = empty choices
-            logger.warning(f"⚠️ Primary model {primary_model} failed. Switching to fallback: {fallback_model}")
+        if not result.success and (result.error_code >= 400 or result.error_code in [0, 200]):
+            logger.warning(
+                f"⚠️ Primary model {primary_model} failed (code {result.error_code}). Switching to fallback: {fallback_model}")
             result = await self._try_generate(messages, fallback_model, max_retries, is_fallback=True)
 
         return result
