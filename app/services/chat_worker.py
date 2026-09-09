@@ -27,8 +27,7 @@ def _truncate(value: str, limit: int = 1500) -> str:
     return value[: limit - 1] + "…"
 
 
-def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[
-    bool, list[str]]:
+def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[bool, list[str]]:
     """Детектор зацикливания: ловит копипаст и повторяющиеся действия."""
     if len(recent_assistant_msgs) < 2:
         return False, []
@@ -178,14 +177,11 @@ async def process_chat_task(
             ]
 
             if attempt > 0 and base_settings is not None:
-                increased_temp = min(base_temperature + 0.2, 1.1)
+                increased_temp = min(base_temperature + 0.25, 1.15)
                 logger.info(f"🌡️ Retry {attempt + 1}: Temp={increased_temp}")
                 new_settings = copy.deepcopy(base_settings)
                 new_settings.temperature = increased_temp
-                # 🔥 FIX 2: Жесткий штраф за повторение n-грамм
-                new_settings.repetition_penalty = 1.25
-                if hasattr(new_settings, 'presence_penalty'):
-                    new_settings.presence_penalty = 0.15
+                # 🔥 БЕЗОПАСНО: Убраны попытки установить repetition_penalty, чтобы не ронять Pydantic
                 llm._settings = new_settings
 
             try:
@@ -218,14 +214,14 @@ async def process_chat_task(
                 is_fallback = True
                 break
 
-            # 🔥 FIX 3: Проверяем дубликаты против актуального списка
+            # 🔥 FIX 2: Проверяем дубликаты против актуального списка
             is_dup, bad_phrases = _is_duplicate_response(candidate_answer, current_assistant_msgs, task.text)
 
             if is_dup:
                 if attempt < MAX_REGEN_ATTEMPTS:
                     logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying with mutated system prompt...")
 
-                    # 🔥 FIX 4: Временная мутация системного промпта вместо спама ролью "Director"
+                    # 🔥 FIX 3: Временная мутация системного промпта вместо спама ролью "Director"
                     for msg in messages:
                         if msg["role"] == "system":
                             original_system = msg["content"]
