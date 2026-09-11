@@ -134,6 +134,37 @@ def get_characters_keyboard(characters: list[dict], per_row: int = 2) -> str:
     return kb.to_json()
 
 
+def get_characters_paginated_keyboard(characters: list[dict], page: int, total_pages: int, per_row: int = 2) -> str:
+    """Создает инлайн-клавиатуру со списком персонажей с пагинацией."""
+    # Используем inline=True, чтобы клавиатура не перекрывала поле ввода и выглядела аккуратно
+    kb = KeyboardBuilder(one_time=False, inline=True)
+
+    for i, char in enumerate(characters):
+        # Обрезаем имя, чтобы оно гарантированно влезло в кнопку VK (макс ~40 символов, лучше меньше)
+        label = char["name"][:22] + "..." if len(char["name"]) > 22 else char["name"]
+        kb.add_button(
+            label=label,
+            payload={"cmd": "select_char", "char_id": char["id"]},
+            color="primary"
+        )
+        if (i + 1) % per_row == 0:
+            kb.row()
+
+    # Ряд навигации по страницам
+    kb.row()
+    if page > 1:
+        kb.add_button("⬅️ Назад", payload={"cmd": "chars", "page": page - 1}, color="secondary")
+
+    if page < total_pages:
+        kb.add_button("Вперед ➡️", payload={"cmd": "chars", "page": page + 1}, color="secondary")
+
+    # Ряд с выходом в главное меню
+    kb.row()
+    kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
+
+    return kb.to_json()
+
+
 def get_character_actions_keyboard(char_id: int) -> str:
     """Клавиатура после выбора персонажа."""
     kb = KeyboardBuilder(one_time=False)
@@ -245,16 +276,42 @@ async def handle_update(
         send_keyboard = get_main_menu_keyboard()
 
     # === СПИСОК ПЕРСОНАЖЕЙ ===
-    elif cmd == "chars":
-        characters = await char_repo.get_all_active()
-        if not characters:
+    # === СПИСОК ПЕРСОНАЖЕЙ (С НАСТОЯЩЕЙ БД-ПАГИНАЦИЕЙ) ===
+    elif cmd == "chars" or text_lower in ("персонажи", "выбрать персонажа", "персонаж"):
+        page = int(payload.get("page", 1))
+        chars_per_page = 6  # 2 в ряд * 3 ряда = 6 кнопок (идеально для inline)
+
+        # 1. Узнаем общее количество, чтобы рассчитать страницы
+        total_chars = await char_repo.get_active_characters_count()
+
+        if total_chars == 0:
             answer = "Пока нет доступных персонажей. Загляни позже! 😿"
             send_keyboard = get_main_menu_keyboard()
         else:
-            answer = (
-                "👥 Выбери, с кем хочешь пообщаться:\n\n"
-            )
-            send_keyboard = get_characters_keyboard(characters)
+            total_pages = (total_chars + chars_per_page - 1) // chars_per_page
+
+            # Защита от некорректных номеров страниц (например, если кто-то подделал payload)
+            if page < 1:
+                page = 1
+            elif page > total_pages:
+                page = total_pages
+
+            # 2. Загружаем ТОЛЬКО нужных персонажей из БД (быстро и экономно)
+            offset = (page - 1) * chars_per_page
+            page_chars = await char_repo.get_active_characters_paginated(chars_per_page, offset)
+
+            # 3. Формируем красивое текстовое описание
+            answer = f"👥 Доступные персонажи (Страница {page} из {total_pages}):\n\n"
+            for i, char in enumerate(page_chars, start=offset + 1):
+                desc = char.get("description", "Описание отсутствует")
+                # Обрезаем описание, чтобы сообщение не было гигантским, но давало понять суть
+                short_desc = desc[:120] + "…" if len(desc) > 120 else desc
+                answer += f"{i}. **{char['name']}**\n{short_desc}\n\n"
+
+            answer += "Нажми на имя персонажа ниже, чтобы выбрать его 👇"
+
+            # 4. Генерируем клавиатуру (функцию get_characters_paginated_keyboard мы добавили в прошлом шаге)
+            send_keyboard = get_characters_paginated_keyboard(page_chars, page, total_pages)
 
     # === ВЫБОР КОНКРЕТНОГО ПЕРСОНАЖА ===
     elif cmd == "select_char":

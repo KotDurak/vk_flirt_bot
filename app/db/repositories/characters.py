@@ -80,6 +80,31 @@ class CharacterRepository:
         )
         await conn.commit()
 
+    async def get_active_characters_count(self) -> int:
+        """Возвращает общее количество активных персонажей для расчета страниц."""
+        conn = self.db.connection
+        cursor = await conn.execute(
+            "SELECT COUNT(id) FROM characters WHERE is_active = TRUE"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def get_active_characters_paginated(self, limit: int, offset: int) -> list[dict]:
+        """Возвращает только нужную 'страницу' персонажей прямо из базы данных."""
+        conn = self.db.connection
+        cursor = await conn.execute(
+            """
+            SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position 
+            FROM characters 
+            WHERE is_active = TRUE 
+            ORDER BY position 
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
 COMMON_RP_PROMPT = """
 ### ИНСТРУКЦИИ ДЛЯ ОТЫГРЫША ###
 
