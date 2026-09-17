@@ -1,4 +1,3 @@
-# app/db/connection.py
 import logging
 from pathlib import Path
 import aiosqlite
@@ -8,7 +7,8 @@ logger = logging.getLogger(__name__)
 
 class Database:
     """
-    Управляет подключением к SQLite и настройкой производительности.
+    Управляет подключением к SQLite и настройкой производительности
+    для высокой многопользовательской нагрузки.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -20,26 +20,41 @@ class Database:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
         logger.info("Connecting to SQLite database at %s", self.db_path)
-        self._conn = await aiosqlite.connect(self.db_path)
+
+        # ВАЖНО для многопользовательской нагрузки:
+        # isolation_level="IMMEDIATE" предотвращает deadlock при конкурентной записи
+        # check_same_thread=False необходим для корректной работы с asyncio/aiogram
+        self._conn = await aiosqlite.connect(
+            self.db_path,
+            isolation_level="IMMEDIATE",
+            check_same_thread=False
+        )
 
         # Возвращаем строки как словари (удобно работать)
         self._conn.row_factory = aiosqlite.Row
         await self._setup_pragmas()
 
     async def _setup_pragmas(self) -> None:
-        """Включаем WAL-режим и защиту от блокировок."""
+        """Включаем режимы для максимальной производительности и защиты от блокировок."""
         if not self._conn:
             return
 
-        # WAL (Write-Ahead Logging) позволяет читать и писать одновременно
+        # WAL позволяет читать и писать одновременно без блокировки всей БД
         await self._conn.execute("PRAGMA journal_mode=WAL;")
-        # NORMAL синхронизация - баланс между скоростью и надежностью
+
+        # NORMAL - идеальный баланс скорости и безопасности при использовании WAL
         await self._conn.execute("PRAGMA synchronous=NORMAL;")
-        # Ждем 10 секунд, если база занята другим процессом
+
+        # Ждем 10 секунд, если база занята (защита от пиковых нагрузок)
         await self._conn.execute("PRAGMA busy_timeout=10000;")
-        # Включаем внешние ключи
+
+        # Включаем внешние ключи (обязательно для каждой новой сессии в SQLite)
         await self._conn.execute("PRAGMA foreign_keys=ON;")
-        logger.info("SQLite pragmas configured")
+
+        # Бонус: увеличиваем кэш страниц в памяти до 64 МБ для ускорения записи сообщений
+        await self._conn.execute("PRAGMA cache_size=-64000;")
+
+        logger.info("SQLite pragmas configured for high concurrency")
 
     async def close(self) -> None:
         if self._conn:
