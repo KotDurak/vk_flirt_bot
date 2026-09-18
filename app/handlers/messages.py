@@ -188,6 +188,46 @@ def get_payment_keyboard() -> str:
     return kb.to_json()
 
 
+def get_payment_action_keyboard(payment_url: str, invoice_id: str) -> str:
+    """Клавиатура с изящной кнопкой-ссылкой на оплату."""
+    keyboard = {
+        "one_time": False,
+        "inline": True,
+        "buttons": [
+            [
+                {
+                    "action": {
+                        "type": "open_link",
+                        "link": payment_url,  # Сюда передаем short_url или обычную ссылку
+                        "label": "💳 Оплатить"
+                    }
+                }
+            ],
+            [
+                {
+                    "action": {
+                        "type": "text",
+                        "payload": json.dumps({"cmd": "check_payment", "invoice_id": invoice_id}),
+                        "label": "✅ Я оплатил, проверить"
+                    },
+                    "color": "positive"
+                }
+            ],
+            [
+                {
+                    "action": {
+                        "type": "text",
+                        "payload": json.dumps({"cmd": "start"}),
+                        "label": "⬅️ В главное меню"
+                    },
+                    "color": "secondary"
+                }
+            ]
+        ]
+    }
+    return json.dumps(keyboard)
+
+
 def get_check_payment_keyboard(invoice_id: str) -> str:
     """Кнопка для проверки статуса платежа."""
     kb = KeyboardBuilder(one_time=False, inline=True)
@@ -423,16 +463,20 @@ async def handle_update(
                 messages=energy,
             )
 
+            # Сокращаем ссылку для красоты и надежности (VK лучше относится к коротким URL)
             short_url = await shorten_url(result.payment_url)
 
             answer = (
-                f"💳 Оплата {amount}₽ за {energy} энергии\n\n"
-                f"1. Перейди по ссылке для оплаты\n"
-                f"2. Выбери удобный способ оплаты\n"
-                f"3. После оплаты нажми кнопку 'Проверить'\n\n"
-                f"Ссылка на оплату:\n{short_url}"
+                f"💳 Оформление заказа\n\n"
+                f"Пакет: {energy} энергии\n"
+                f"К оплате: {amount}₽\n\n"
+                f"Нажмите на кнопку ниже, чтобы перейти к безопасной оплате. "
+                f"После успешного перевода не забудьте нажать «Проверить»!"
             )
-            send_keyboard = get_check_payment_keyboard(result.invoice_id)
+
+            # Используем новую красивую клавиатуру вместо старой
+            send_keyboard = get_payment_action_keyboard(short_url, result.invoice_id)
+
         else:
             answer = f"❌ Ошибка создания платежа: {result.error_message}"
             send_keyboard = get_payment_keyboard()
