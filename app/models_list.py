@@ -41,14 +41,7 @@ MODELS_LIST = {
     'qwen/qwen-2.5-72b-instruct': {
         'description': '⚡ ФАВОРИТ. Чистый русский, NSFW не моралит, держит формат. Бабушка оказалась с характером!'
     },
-
     # === Специализированные RP-модели (если есть у провайдера) ===
-    'neversleep/llama-3-lumimaid-70b': {
-        'description': 'Заточена под NSFW-литературу. Отказы на нуле. Искать на Polza/RouterAI'
-    },
-    'cognitivecomputations/dolphin-2.9-llama3-70b': {
-        'description': 'Король uncensored. Вообще не знает слова "нет". Но стиль хромает'
-    },
     'sao10k/l3.1-70b-stheno-v3.2': {
         'description': 'Младшая сестра Euryale. Меньше отказов, лучше держит контекст'
     },
