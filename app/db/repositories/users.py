@@ -63,3 +63,24 @@ class UserRepository:
             (model_name, vk_user_id)
         )
         await self.db.connection.commit()
+
+    async def get_by_vk_id(self, vk_user_id: int) -> dict | None:
+        """Получает пользователя по его VK ID, не создавая нового."""
+        query = "SELECT * FROM users WHERE vk_user_id = ?"
+        cursor = await self.db.connection.execute(query, (vk_user_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def refill_all_messages(self, target_amount: int) -> int:
+        """
+        Массовое пополнение: устанавливает колонку messages = target_amount
+        всем, у кого она меньше. Возвращает количество затронутых строк.
+        """
+        query = """
+            UPDATE users 
+            SET messages = ? 
+            WHERE messages < ?
+        """
+        cursor = await self.db.connection.execute(query, (target_amount, target_amount))
+        await self.db.connection.commit()
+        return cursor.rowcount

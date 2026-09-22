@@ -559,6 +559,107 @@ async def handle_update(
                 else:
                     answer = "❌ Модель не найдена. Используй `/model` для просмотра списка."
                 send_keyboard = get_main_menu_keyboard()
+    # === АДМИН-ПАНЕЛЬ (ТОЛЬКО ДЛЯ АДМИНА) ===
+    elif text_lower.startswith("/admin") or cmd.startswith("admin_"):
+        if not get_settings().is_admin(int(from_id)):
+            answer = "🔒 Эта команда доступна только администратору."
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            parts = text_lower.split()
+            command = parts[0]
+
+            # 1. Проверка пользователя: /admin_check 123456789
+            if command in ("/admin_check", "/admin_info") and len(parts) >= 2:
+                vk_id = int(parts[1])
+                target_user = await user_repo.get_by_vk_id(vk_id)
+
+                if not target_user:
+                    answer = f"❌ Пользователь с VK ID {vk_id} не найден в БД."
+                else:
+                    # Берем внутренний ID для всех остальных репозиториев
+                    user_id = target_user["id"]
+
+                    balance = await payment_repo.get_user_balance(user_id)
+                    stats = await payment_repo.get_user_stats(user_id)
+                    current_char = await char_repo.get_user_character(user_id)
+                    char_name = current_char["name"] if current_char else "не выбран"
+
+                    answer = (
+                        f"🔍 Инфо о пользователе {vk_id}:\n\n"
+                        f"⚡ Баланс (messages): {balance}\n"
+                        f"💬 Сообщений всего: {stats['total_messages']}\n"
+                        f"💰 Куплено энергии: {stats['total_energy_bought']}\n"
+                        f"🎭 Текущий персонаж: {char_name}"
+                    )
+
+            # 2. Начисление энергии конкретному юзеру: /admin_add 123456789 50
+            elif command in ("/admin_add", "/admin_add_energy") and len(parts) >= 3:
+                vk_id = int(parts[1])
+                amount = int(parts[2])
+
+                target_user = await user_repo.get_by_vk_id(vk_id)
+                if not target_user:
+                    answer = f"❌ Пользователь с VK ID {vk_id} не найден."
+                else:
+                    user_id = target_user["id"]
+                    await payment_repo.add_user_messages(user_id, amount)
+                    new_balance = await payment_repo.get_user_balance(user_id)
+
+                    answer = (
+                        f"✅ Начислено {amount} энергии пользователю {vk_id}.\n"
+                        f"Новый баланс: {new_balance} ⚡"
+                    )
+
+            # 3. Сброс истории пользователя: /admin_reset 123456789
+            elif command in ("/admin_reset", "/admin_reset_history") and len(parts) >= 2:
+                vk_id = int(parts[1])
+
+                target_user = await user_repo.get_by_vk_id(vk_id)
+                if not target_user:
+                    answer = f"❌ Пользователь с VK ID {vk_id} не найден."
+                else:
+                    user_id = target_user["id"]
+                    current_char = await char_repo.get_user_character(user_id)
+
+                    if current_char:
+                        await msg_repo.clear_history(user_id, current_char["id"])
+                        await summary_repo.clear_summary(user_id, current_char["id"])
+                        answer = (
+                            f"🔄 История пользователя {vk_id} успешно сброшена!\n"
+                            f"(Персонаж: {current_char['name']})"
+                        )
+                    else:
+                        await msg_repo.clear_history(user_id)
+                        await summary_repo.clear_summary(user_id)
+                        answer = f"🔄 Глобальная история пользователя {vk_id} сброшена."
+
+            # 4. 🚀 МАССОВОЕ ПОПОЛНЕНИЕ ВСЕМ: /admin_refill_all 50
+            elif command == "/admin_refill_all" and len(parts) >= 2:
+                target_amount = int(parts[1])
+
+                # Вызываем метод из UserRepository (он работает напрямую с таблицей users)
+                affected_count = await user_repo.refill_all_messages(target_amount)
+
+                answer = (
+                    f"🚀 МАССОВОЕ ПОПОЛНЕНИЕ ВЫПОЛНЕНО!\n\n"
+                    f"✅ {affected_count} пользователям установлен баланс {target_amount} ⚡\n"
+                    f"(Затронуты только те, у кого messages < {target_amount})\n\n"
+                    f"Можно публиковать пост в паблике! 🐾"
+                )
+
+            # 5. Справка по админ-командам
+            else:
+                answer = (
+                    "🛠️ Доступные админ-команды:\n\n"
+                    "`/admin_check <vk_id>` — узнать баланс и статистику\n"
+                    "`/admin_add <vk_id> <кол-во>` — начислить энергию вручную\n"
+                    "`/admin_reset <vk_id>` — сбросить историю пользователю\n"
+                    "`/admin_refill_all <кол-во>` — 🚀 массово пополнить всем (для релизов)"
+                )
+
+            send_keyboard = get_main_menu_keyboard()
+
+            send_keyboard = get_main_menu_keyboard()
     # === ПЕРЕГЕНЕРАЦИЯ ОТВЕТА ===
     elif cmd == "regenerate":
         current_char = await char_repo.get_user_character(user["id"])
