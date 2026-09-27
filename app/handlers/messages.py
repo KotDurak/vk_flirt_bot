@@ -6,6 +6,8 @@ import logging
 from typing import Any
 import asyncio
 import aiohttp
+
+from app.db.repositories.promo import PromoRepository
 from app.services.event_cache import EventCache
 from app.vk.api import VKApi
 from app.vk.keyboard import KeyboardBuilder
@@ -88,17 +90,40 @@ async def shorten_url(long_url: str) -> str:
     # Если сокращение не удалось, возвращаем оригинал
     return long_url
 
+
 def get_main_menu_keyboard() -> str:
     """Главное меню бота."""
     kb = KeyboardBuilder(one_time=False)
+
+    # Основные действия
     kb.add_button("👤 Выбрать персонажа", payload={"cmd": "chars"}, color="primary")
     kb.row()
     kb.add_button("⚡ Купить энергию", payload={"cmd": "buy"}, color="positive")
     kb.row()
+
+    # Второстепенные действия (по 2 в ряд для аккуратности на мобильных)
     kb.add_button("📊 Мой профиль", payload={"cmd": "profile"}, color="secondary")
-    kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
+    kb.add_button("🎁 Ввести промокод", payload={"cmd": "promo"}, color="secondary")
     kb.row()
+
+    # Служебные действия
+    kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
     kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
+
+    return kb.to_json()
+
+
+def get_admin_promo_list_keyboard(page: int, total_pages: int) -> str:
+    """Клавиатура для пагинации списка промокодов."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+
+    if page > 1:
+        kb.add_button("⬅️ Назад", payload={"cmd": "admin_promo_list", "page": page - 1}, color="secondary")
+    if page < total_pages:
+        kb.add_button("Вперед ➡️", payload={"cmd": "admin_promo_list", "page": page + 1}, color="secondary")
+
+    kb.row()
+    kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
 def get_dialog_keyboard() -> str:
@@ -253,6 +278,7 @@ async def handle_update(
         payment_repo: PaymentRepository,
         payment_provider: PaymentProvider,
         event_cache: EventCache,
+        promo_repo: PromoRepository,
         chat_queue,
 ) -> None:
     update_type = update.get("type")
@@ -569,6 +595,7 @@ async def handle_update(
         else:
             parts = text_lower.split()
             command = parts[0]
+            send_keyboard = get_main_menu_keyboard()
 
             # 1. Проверка пользователя: /admin_check 123456789
             if command in ("/admin_check", "/admin_info") and len(parts) >= 2:
@@ -649,19 +676,70 @@ async def handle_update(
                     f"Можно публиковать пост в паблике! 🐾"
                 )
 
-            # 5. Справка по админ-командам
+            # 5. 🎁 СОЗДАНИЕ ПРОМОКОДА: /admin_promo_add CODE REWARD [MAX_USES]
+            elif command == "/admin_promo_add" and len(parts) >= 3:
+                code = parts[1].upper()
+                try:
+                    reward = int(parts[2])
+                    # Если третий аргумент есть и это не "0", используем его. Иначе None (безлимит)
+                    if len(parts) > 3 and parts[3] != "0":
+                        max_uses = int(parts[3])
+                    else:
+                        max_uses = None
+                except ValueError:
+                    answer = "❌ Ошибка: награда и лимит должны быть числами.\nПример: /admin_promo_add KITSUNE 50 100"
+                else:
+                    await promo_repo.create_promo_code(code, reward, max_uses)
+
+                    limit_text = f"{max_uses} раз" if max_uses is not None else "Безлимитно"
+                    answer = (
+                        f"✅ Промокод успешно создан!\n\n"
+                        f"Код: `{code}`\n"
+                        f"Награда: {reward} энергии\n"
+                        f"Общий лимит активаций: {limit_text}\n"
+                        f"(Каждый пользователь может использовать его только 1 раз)"
+                    )
+
+            # 6. 📋 СПИСОК ПРОМОКОДОВ С ПАГИНАЦИЕЙ
+            elif command == "/admin_promo_list" or cmd == "admin_promo_list":
+                page = int(payload.get("page", 1))
+                per_page = 10
+
+                # Защита от некорректных страниц
+                if page < 1:
+                    page = 1
+
+                promos, total = await promo_repo.get_all_active_promos(limit=per_page, offset=(page - 1) * per_page)
+
+                # Рассчитываем общее количество страниц
+                total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+                if page > total_pages:
+                    page = total_pages
+
+                if not promos:
+                    answer = "📭 Активных промокодов пока нет."
+                    send_keyboard = get_main_menu_keyboard()
+                else:
+                    answer = f"📋 Активные промокоды (Стр. {page} из {total_pages}):\n\n"
+                    for p in promos:
+                        limit = f"{p['current_uses']}/{p['max_uses']}" if p[
+                                                                              'max_uses'] is not None else f"{p['current_uses']}/∞"
+                        answer += f"🔹 `{p['code']}` | Награда: {p['reward']} | Использовано: {limit}\n"
+
+                    answer += "\n Чтобы создать новый: `/admin_promo_add КОД НАГРАДА [ЛИМИТ]`"
+                    send_keyboard = get_admin_promo_list_keyboard(page, total_pages)
+
+            # 7. Справка по админ-командам (ОБНОВЛЕННАЯ)
             else:
                 answer = (
                     "🛠️ Доступные админ-команды:\n\n"
                     "`/admin_check <vk_id>` — узнать баланс и статистику\n"
                     "`/admin_add <vk_id> <кол-во>` — начислить энергию вручную\n"
                     "`/admin_reset <vk_id>` — сбросить историю пользователю\n"
-                    "`/admin_refill_all <кол-во>` — 🚀 массово пополнить всем (для релизов)"
+                    "`/admin_refill_all <кол-во>` — 🚀 массово пополнить всем\n"
+                    "`/admin_promo_add <код> <награда> [лимит]` — 🎁 создать промокод\n"
+                    "`/admin_promo_list` — 📋 показать все активные промокоды"
                 )
-
-            send_keyboard = get_main_menu_keyboard()
-
-            send_keyboard = get_main_menu_keyboard()
     # === ПЕРЕГЕНЕРАЦИЯ ОТВЕТА ===
     elif cmd == "regenerate":
         current_char = await char_repo.get_user_character(user["id"])
@@ -713,7 +791,48 @@ async def handle_update(
                             model_name=active_model,
                         ))
                         return
+    # === ПРОМОКОДЫ ===
+    elif cmd == "promo" or text_lower.startswith("/promo"):
+        if cmd == "promo" and not text:
+            answer = (
+                " Введите промокод!\n\n"
+                "Напишите команду в формате:\n"
+                "/promo KITSUNE2026\n\n"
+                "Следите за нашими постами в ВК — там мы публикуем новые коды! 😉"
+            )
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            promo_code = ""
+            if text_lower.startswith("/promo"):
+                parts = text.split(maxsplit=1)
+                promo_code = parts[1].strip().upper() if len(parts) > 1 else ""
 
+            if not promo_code:
+                answer = "🎁 Введите промокод!\n\nНапишите команду в формате:\n/promo KITSUNE2026"
+                send_keyboard = get_main_menu_keyboard()
+            else:
+                promo = await promo_repo.get_active_promo(promo_code)
+
+                if not promo:
+                    answer = f"❌ Промокод {promo_code} не найден или уже недействителен.\n\nПроверьте правильность написания или следите за новыми акциями!"
+                    send_keyboard = get_main_menu_keyboard()
+                elif await promo_repo.has_user_used_promo(user["id"], promo["id"]):
+                    answer = f"⚠️ Вы уже использовали промокод {promo_code}.\n\nКаждый промокод можно активировать только один раз!"
+                    send_keyboard = get_main_menu_keyboard()
+                else:
+                    reward = promo["reward"]
+                    await payment_repo.add_user_messages(user["id"], reward)
+                    await promo_repo.apply_promo_code(user["id"], promo["id"])
+
+                    new_balance = await payment_repo.get_user_balance(user["id"])
+
+                    answer = (
+                        f"🎉 Промокод {promo_code} активирован!\n\n"
+                        f"⚡ Начислено: {reward} энергии\n"
+                        f"💬 Текущий баланс: {new_balance} энергии\n\n"
+                        f"Приятного общения! 😉"
+                    )
+                    send_keyboard = get_main_menu_keyboard()
     # === ОБЫЧНЫЙ ДИАЛОГ С ПЕРСОНАЖЕМ ===
     else:
         if cmd == "chat":
@@ -779,12 +898,13 @@ async def handle_update(
                 target_model = settings.model
                 balance = await payment_repo.get_user_balance(user["id"])
                 if balance <= 0:
-                    answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить общение:"
-                    answer += """
-                    \nПока восстанавливаешься, можешь попробовать другие наши проекты:
-                     \n🎨 Генератор идеальных вайфу: @MyNekoBaka89_bot
-                     \n💻 Шира-тян — твоя ИИ-ассистентка: @shira_neuro_bot
-                    """
+                    answer = (
+                        "😿 У тебя закончилась энергия!\n\n"
+                        "Купи новый пакет, чтобы продолжить общение.\n\n"
+                        "Пока восстанавливаешься, можешь попробовать другие наши проекты:\n"
+                        "🎨 Генератор идеальных вайфу: @MyNekoBaka89_bot\n"
+                        "💻 Шира-тян — твоя ИИ-ассистентка: @shira_neuro_bot"
+                    )
                     send_keyboard = get_payment_keyboard()
                     await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return

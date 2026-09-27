@@ -118,5 +118,44 @@ async def run_migrations(db: Database) -> None:
         ON payments(user_id, status);
     """)
 
+    # === ТАБЛИЦА ПРОМОКОДОВ ===
+    await conn.execute("""
+           CREATE TABLE IF NOT EXISTS promo_codes (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               code TEXT NOT NULL UNIQUE,
+               reward INTEGER NOT NULL,
+               max_uses INTEGER,  -- ✅ Теперь может быть NULL (безлимит)
+               current_uses INTEGER DEFAULT 0,
+               is_active INTEGER DEFAULT 1,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           );
+       """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_promo_codes_code ON promo_codes(code);
+    """)
+
+    # === ТАБЛИЦА ИСПОЛЬЗОВАНИЯ ПРОМОКОДОВ (Защита от повторного использования) ===
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS promo_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            promo_code_id INTEGER NOT NULL,
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, promo_code_id),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id)
+        );
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_promo_usage_user ON promo_usage(user_id);
+    """)
+
+    # ✅ ДОБАВЛЯЕМ ЭТУ СТРОКУ ДЛЯ БАРСИКА:
+    await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_promo_usage_promo_code ON promo_usage(promo_code_id);
+        """)
+
     await conn.commit()
     logger.info("Migrations completed successfully. Database is clean and ready.")
