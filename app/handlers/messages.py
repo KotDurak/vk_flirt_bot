@@ -311,7 +311,9 @@ async def handle_update(
         answer = (
             f"Привет! 👋 Я твой виртуальный компаньон для общения.\n\n"
             f"⚡ У тебя осталось {balance} энергии\n\n"
-            f"Выбери, что хочешь сделать, с помощью кнопок ниже!"
+            f"Выбери, что хочешь сделать, с помощью кнопок ниже!\n\n"
+            "🎨 Хочешь увидеть свою мечту в картинках? Твой личный художник по аниме-девочкам: @MyNekoBaka89_bot\n\n"
+            "💻 А если нужна помощь с кодом или вопросами по IT — загляни к Шире-тян: @shira_neuro_bot"
         )
         send_keyboard = get_main_menu_keyboard()
 
@@ -778,6 +780,11 @@ async def handle_update(
                 balance = await payment_repo.get_user_balance(user["id"])
                 if balance <= 0:
                     answer = "😿 У тебя закончилась энергия!\n\nКупи новый пакет, чтобы продолжить общение:"
+                    answer += """
+                    \nПока восстанавливаешься, можешь попробовать другие наши проекты:
+                     \n🎨 Генератор идеальных вайфу: @MyNekoBaka89_bot
+                     \n💻 Шира-тян — твоя ИИ-ассистентка: @shira_neuro_bot
+                    """
                     send_keyboard = get_payment_keyboard()
                     await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
