@@ -157,5 +157,27 @@ async def run_migrations(db: Database) -> None:
             CREATE INDEX IF NOT EXISTS idx_promo_usage_promo_code ON promo_usage(promo_code_id);
         """)
 
+    # === ТАБЛИЦА ОБРАЩЕНИЙ В ПОДДЕРЖКУ ===
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            vk_user_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            attachment_url TEXT,
+            status TEXT DEFAULT 'open',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status);
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_support_tickets_vk_user ON support_tickets(vk_user_id);
+    """)
+
     await conn.commit()
     logger.info("Migrations completed successfully. Database is clean and ready.")

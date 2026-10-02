@@ -23,6 +23,7 @@ from app.db.repositories.payments import PaymentRepository  # ← НОВОЕ
 from app.services.payments.factory import create_payment_provider  # ← НОВОЕ
 from app.services.event_cache import EventCache
 from app.db.repositories.promo import PromoRepository
+from app.db.repositories.support import SupportRepository
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ async def run_bot() -> None:
     summary_repo = SummaryRepository(db)
     payment_repo = PaymentRepository(db)
     promo_repo = PromoRepository(db)
+    support_repo = SupportRepository(db)
 
     # === 2. Платёжная система ===
     payment_provider = create_payment_provider()  # ← НОВОЕ
@@ -106,7 +108,8 @@ async def run_bot() -> None:
                         payment_provider=payment_provider, # ← НОВОЕ
                         event_cache=event_cache,
                         chat_queue=chat_queue,
-                        promo_repo=promo_repo
+                        promo_repo=promo_repo,
+                        support_repo=support_repo
                     )
                 except Exception:
                     logger.exception("Failed to handle update")

@@ -1,4 +1,5 @@
 #app/handlers/messages.py
+#ВАЖНО! В этом файле запрещено писать функции, логику!!! Кто напишет того Барсик покусает
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from app.db.repositories.payments import PaymentRepository
 from app.services.payments.base import PaymentProvider
 from app.services.chat_queue import ChatTask
 from app.config import get_settings, get_llm_settings
+from app.db.repositories.support import SupportRepository
 
 from app.vk.keyboards import (
     get_main_menu_keyboard,
@@ -28,6 +30,8 @@ from app.vk.keyboards import (
     get_regenerate_inline_keyboard,
     get_admin_promo_list_keyboard,
     get_dialog_keyboard,
+    get_admin_ticket_list_keyboard,       # <--- ДОБАВИТЬ
+    get_admin_ticket_actions_keyboard,
 )
 from app.utils import (
     _extract_message,
@@ -36,8 +40,10 @@ from app.utils import (
     shorten_url,
     generate_and_upload_qr,
 )
-
+import time
 logger = logging.getLogger(__name__)
+
+awaiting_support = {}
 
 async def handle_update(
         update: dict[str, Any],
@@ -52,6 +58,7 @@ async def handle_update(
         payment_provider: PaymentProvider,
         event_cache: EventCache,
         promo_repo: PromoRepository,
+        support_repo: SupportRepository,
         chat_queue,
 ) -> None:
     update_type = update.get("type")
@@ -223,7 +230,7 @@ async def handle_update(
         send_keyboard = get_main_menu_keyboard()
 
     # === СБРОС ===
-    elif text_lower in ("/reset", "сброс", "сбросить") or cmd == "reset":
+    elif text_lower in ("/reset") or cmd == "reset":
         current_char = await char_repo.get_user_character(user["id"])
         if current_char:
             await msg_repo.clear_history(user["id"], current_char["id"])
@@ -234,6 +241,43 @@ async def handle_update(
             await summary_repo.clear_summary(user["id"])
             answer = "🔄 Вся история сброшена! Начнем всё с чистого листа? 😉"
         send_keyboard = get_main_menu_keyboard()
+    # === ПОДДЕРЖКА (Только по явной команде /support или клику по кнопке) ===
+    elif text_lower.startswith("/support") or cmd == "support":
+        # 1. Фильтруем текст кнопки. Если это просто название кнопки или команды — считаем текст пустым.
+        if text_lower in ("поддержка", "support", "🆘 поддержка", "🆘 support", "/support", "🆘"):
+            support_text = ""
+        else:
+            parts = text.split(maxsplit=1)
+            support_text = parts[1].strip() if len(parts) > 1 else ""
+
+        attachments = message.get("attachments", [])
+
+        # 2. Если нет ни нормального текста, ни скриншота — показываем инструкцию и ЗАПОМИНАЕМ юзера
+        if not support_text and not attachments:
+            # ЗАПОМИНАЕМ: юзер нажал кнопку и мы ждем от него следующее сообщение (5 минут)
+            awaiting_support[int(from_id)] = time.time()
+
+            answer = (
+                "🆘 Служба поддержки\n\n"
+                "Пожалуйста, опиши суть проблемы и прикрепи скриншот (если есть).\n\n"
+                "💡 *Как отправить:*\n"
+                "Просто напиши текст жалобы и прикрепи фото к этому сообщению. "
+                "Если ты просто нажал кнопку — напиши суть проблемы следующим сообщением (можно просто отправить скриншот)."
+            )
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            # 3. Вызываем сервис. Барсик доволен, логика не в хендлере!
+            from app.services.support import process_support_request
+
+            answer = await process_support_request(
+                api=api,
+                user_id=user["id"],
+                vk_user_id=int(from_id),
+                text=support_text,
+                attachments=attachments,
+                support_repo=support_repo
+            )
+            send_keyboard = get_main_menu_keyboard()
 
     # === ПОКУПКА ЭНЕРГИИ ===
     elif cmd == "buy":
@@ -381,7 +425,7 @@ async def handle_update(
             send_keyboard = get_main_menu_keyboard()
         else:
             parts = text_lower.split()
-            command = parts[0]
+            command = cmd if cmd else (parts[0] if parts else "")
             send_keyboard = get_main_menu_keyboard()
 
             # 1. Проверка пользователя: /admin_check 123456789
@@ -515,8 +559,95 @@ async def handle_update(
 
                     answer += "\n Чтобы создать новый: `/admin_promo_add КОД НАГРАДА [ЛИМИТ]`"
                     send_keyboard = get_admin_promo_list_keyboard(page, total_pages)
+            # 7. 🎫 ПРОСМОТР ТИКЕТОВ С ПАГИНАЦИЕЙ: /admin_tickets [страница] или кнопка
+            elif command == "admin_tickets" or text_lower == "/admin_tickets":
+                try:
+                    # Берем страницу из payload (если кнопка) или из текста (если команда)
+                    page = int(payload.get("page", 1))
+                    if len(parts) > 1 and text_lower.startswith("/admin_tickets"):
+                        page = int(parts[1])
+                    if page < 1:
+                        page = 1
+                except ValueError:
+                    answer = "❌ Неверный формат."
+                else:
+                    limit = 4
+                    tickets, total_count = await support_repo.get_tickets_paginated(page=page, limit=limit)
+                    total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
-            # 7. Справка по админ-командам (ОБНОВЛЕННАЯ)
+                    if page > total_pages:
+                        answer = f"❌ Страница {page} не существует. Всего страниц: {total_pages}"
+                    elif not tickets:
+                        answer = "📭 Обращений в поддержку пока нет."
+                    else:
+                        answer = f"🎫 Обращения (Стр. {page} из {total_pages}, всего: {total_count}):\n\n"
+                        for t in tickets:
+                            status_emoji = "🟢" if t["status"] == "open" else "✅"
+                            ans_text = t["text"][:50] + "..." if len(t["text"]) > 50 else t["text"]
+                            answer += (
+                                f"{status_emoji} ID: {t['id']} | VK: {t['vk_user_id']}\n"
+                                f"📝 {ans_text}\n"
+                                f"📎 {'Есть скриншот' if t['attachment_url'] else 'Нет вложений'}\n"
+                                f"🕒 {t['created_at']}\n\n"
+                            )
+
+                        send_keyboard = get_admin_ticket_list_keyboard(tickets, page, total_pages)
+
+            # 8. 👁️ ПРОСМОТР ПОЛНОГО ТИКЕТА: /admin_ticket_view <id> или кнопка
+            elif command == "admin_ticket_view":
+                # Берем ID из payload (кнопка) или из текста (команда)
+                ticket_id = payload.get("id")
+                if not ticket_id and len(parts) >= 2:
+                    try:
+                        ticket_id = int(parts[1])
+                    except ValueError:
+                        pass
+
+                if not ticket_id:
+                    answer = "❌ Неверный ID. Используй кнопку или `/admin_ticket_view <id>`"
+                else:
+                    ticket = await support_repo.get_ticket_by_id(ticket_id)
+                    if not ticket:
+                        answer = f"❌ Тикет с ID {ticket_id} не найден."
+                    else:
+                        status_emoji = "🟢 Открыт" if ticket["status"] == "open" else "✅ Решен"
+                        answer = (
+                            f"🎫 Детали тикета #{ticket['id']} ({status_emoji})\n\n"
+                            f"👤 Внутренний ID: {ticket['user_id']}\n"
+                            f"🆔 VK ID: {ticket['vk_user_id']}\n"
+                            f"🕒 Дата: {ticket['created_at']}\n\n"
+                            f"💬 Текст обращения:\n{ticket['text'] or 'Без текста'}\n\n"
+                        )
+                        if ticket["attachment_url"]:
+                            answer += f"📸 Скриншот: {ticket['attachment_url']}\n"
+
+                        # Возвращаем страницу из payload, чтобы кнопка "Назад" работала корректно
+                        page = int(payload.get("page", 1))
+                        send_keyboard = get_admin_ticket_actions_keyboard(ticket_id, page)
+
+            # 9. ✅ ЗАКРЫТИЕ ТИКЕТА: /admin_ticket_resolve <id> или кнопка
+            elif command == "admin_ticket_resolve":
+                # Берем ID из payload (кнопка) или из текста (команда)
+                ticket_id = payload.get("id")
+                if not ticket_id and len(parts) >= 2:
+                    try:
+                        ticket_id = int(parts[1])
+                    except ValueError:
+                        pass
+
+                if not ticket_id:
+                    answer = "❌ Неверный ID. Используй кнопку или `/admin_ticket_resolve <id>`"
+                else:
+                    success = await support_repo.resolve_ticket(ticket_id)
+                    if success:
+                        answer = f"✅ Тикет #{ticket_id} успешно закрыт (статус: resolved)."
+                    else:
+                        answer = f"❌ Не удалось закрыть тикет #{ticket_id}. Возможно, он уже закрыт или не существует."
+
+                    # После закрытия возвращаемся к списку на 1 страницу
+                    send_keyboard = get_admin_ticket_actions_keyboard(ticket_id, 1)
+
+            # 10. Справка по админ-командам (ОБНОВЛЕННАЯ)
             else:
                 answer = (
                     "🛠️ Доступные админ-команды:\n\n"
@@ -525,7 +656,10 @@ async def handle_update(
                     "`/admin_reset <vk_id>` — сбросить историю пользователю\n"
                     "`/admin_refill_all <кол-во>` — 🚀 массово пополнить всем\n"
                     "`/admin_promo_add <код> <награда> [лимит]` — 🎁 создать промокод\n"
-                    "`/admin_promo_list` — 📋 показать все активные промокоды"
+                    "`/admin_promo_list` — 📋 показать все активные промокоды\n"
+                    "`/admin_tickets [стр]` — 🎫 список тикетов (с пагинацией)\n"
+                    "`/admin_ticket_view <id>` — 👁️ полный просмотр тикета + скрин\n"
+                    "`/admin_ticket_resolve <id>` — ✅ закрыть тикет"
                 )
     # === ПЕРЕГЕНЕРАЦИЯ ОТВЕТА ===
     elif cmd == "regenerate":
@@ -626,6 +760,43 @@ async def handle_update(
                     send_keyboard = get_main_menu_keyboard()
     # === ОБЫЧНЫЙ ДИАЛОГ С ПЕРСОНАЖЕМ ===
     else:
+        # 0. ПЕРЕХВАТЧИК ПОДДЕРЖКИ (Проверяем, ждем ли мы жалобу от этого юзера)
+        user_ts = awaiting_support.get(int(from_id))
+
+        # Если юзер в списке ожидания И прошло меньше 300 секунд (5 минут)
+        if user_ts and (time.time() - user_ts <= 300):
+            # Сразу удаляем из словаря, чтобы не перехватить его следующие обычные сообщения
+            del awaiting_support[int(from_id)]
+
+            attachments = message.get("attachments", [])
+            if not text and not attachments:
+                answer = "😿 Ты ничего не написал и не прикрепил скриншот. Попробуй еще раз или нажми кнопку '🆘 Поддержка' в главном меню."
+                send_keyboard = get_main_menu_keyboard()
+            else:
+                from app.services.support import process_support_request
+                answer = await process_support_request(
+                    api=api,
+                    user_id=user["id"],
+                    vk_user_id=int(from_id),
+                    text=text,
+                    attachments=attachments,
+                    support_repo=support_repo
+                )
+                send_keyboard = get_main_menu_keyboard()
+
+            # ВАЖНО: отправляем ответ и делаем return, чтобы код ниже НЕ отправил это персонажу!
+            await api.send_message(
+                peer_id=int(peer_id),
+                text=answer,
+                keyboard=send_keyboard,
+                attachment=attachment,
+            )
+            return
+
+        # 1. СБРОС ФЛАГА, ЕСЛИ ЮЗЕР НАЖАЛ ДРУГУЮ КНОПКУ МЕНЮ (на всякий случай)
+        if cmd and cmd != "support":
+            awaiting_support.pop(int(from_id), None)
+
         if cmd == "chat":
             current_char = await char_repo.get_user_character(user["id"])
 

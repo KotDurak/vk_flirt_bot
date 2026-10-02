@@ -18,6 +18,10 @@ def get_main_menu_keyboard() -> str:
 
     # Служебные действия
     kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
+    kb.add_button("🆘 Поддержка", payload={"cmd": "support"}, color="secondary") # <--- НОВАЯ КНОПКА
+    kb.row()
+
+    # Опасное действие (отдельно, чтобы случайно не нажать)
     kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
 
     return kb.to_json()
@@ -173,4 +177,48 @@ def get_check_payment_keyboard(invoice_id: str) -> str:
     )
     kb.row()
     kb.add_button("⬅️ В главное меню", payload={"cmd": "start"}, color="secondary")
+    return kb.to_json()
+
+
+def get_admin_ticket_list_keyboard(tickets: list[dict], page: int, total_pages: int) -> str:
+    """Клавиатура списка тикетов - только просмотр, закрытие внутри тикета."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+
+    # Кнопки просмотра (по 2 в ряд для компактности)
+    for i, t in enumerate(tickets):
+        tid = t['id']
+        kb.add_button(f"👁️ #{tid}", payload={"cmd": "admin_ticket_view", "id": tid}, color="primary")
+        # Переход на новый ряд после каждых 2 кнопок
+        if (i + 1) % 2 == 0:
+            kb.row()
+
+    # Если последний ряд неполный - завершаем его
+    if len(tickets) % 2 != 0:
+        kb.row()
+
+    # Навигация по страницам
+    if page > 1 or page < total_pages:
+        if page > 1:
+            kb.add_button("⬅️", payload={"cmd": "admin_tickets", "page": page - 1}, color="secondary")
+        if page < total_pages:
+            kb.add_button("➡️", payload={"cmd": "admin_tickets", "page": page + 1}, color="secondary")
+        kb.row()
+
+    kb.add_button(" В меню", payload={"cmd": "start"}, color="secondary")
+    return kb.to_json()
+
+
+def get_admin_ticket_actions_keyboard(ticket_id: int, page: int = 1) -> str:
+    """Кнопки действий для конкретного тикета."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+
+    # Кнопки действий с тикетом
+    kb.add_button("👁️ Просмотреть детали", payload={"cmd": "admin_ticket_view", "id": ticket_id}, color="primary")
+    kb.add_button("✅ Закрыть тикет", payload={"cmd": "admin_ticket_resolve", "id": ticket_id}, color="positive")
+
+    kb.row()
+    # Навигация
+    kb.add_button("⬅️ К списку", payload={"cmd": "admin_tickets", "page": page}, color="secondary")
+    kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
+
     return kb.to_json()

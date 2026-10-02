@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     yookassa_secret_key: str = ""
     yookassa_return_url: str = "https://vk.com/"
     admin_ids: str = ""
+    support_admin_id: int = 0
 
     model_config = SettingsConfigDict(
         env_prefix="VK_BOT_",
