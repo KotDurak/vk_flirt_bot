@@ -67,8 +67,9 @@ async def run_bot() -> None:
 
         # === 5. Очередь чата ===
         chat_queue = ChatQueue(
-            max_workers=1,
-            delay_between_requests=5.0,
+            max_workers=2,
+            retry_delay=1.5,  # базовая пауза ТОЛЬКО при ошибке API (например, 429)
+            max_retries=3,
         )
 
         # Фиксируем зависимости в обработчик через partial
