@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Optional
 import asyncio
 from app.vk.api import VKAPIError
 from app.db.connection import Database
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,25 +23,43 @@ CHARACTERS_DIR.mkdir(parents=True, exist_ok=True)  # Создаст папку, 
 class CharacterRepository:
     """Отвечает за работу с персонажами."""
 
-    # ... (твой код get_all_active, get_by_id и т.д. остается БЕЗ ИЗМЕНЕНИЙ) ...
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def _get_active_filter(self) -> tuple[str, list]:
+        """
+        Возвращает SQL-условие и параметры для фильтрации по allowed_chars из конфига.
+        """
+        allowed_chars = get_settings().allowed_chars.strip()
+
+        if allowed_chars:
+            allowed_slugs = [slug.strip().lower() for slug in allowed_chars.split(",") if slug.strip()]
+            placeholders = ",".join("?" * len(allowed_slugs))
+            return f"is_active = TRUE AND slug IN ({placeholders})", allowed_slugs
+
+        return "is_active = TRUE", []
+
     async def get_all_active(self) -> list[dict]:
         conn = self.db.connection
+        filter_clause, params = self._get_active_filter()
+
         cursor = await conn.execute(
-            "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
-            "FROM characters WHERE is_active = TRUE ORDER BY position"
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            f"FROM characters WHERE {filter_clause} ORDER BY position",
+            params
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
     async def get_by_id(self, character_id: int) -> Optional[dict]:
         conn = self.db.connection
+        filter_clause, params = self._get_active_filter()
+        query_params = params + [character_id]
+
         cursor = await conn.execute(
-            "SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
-            "FROM characters WHERE id = ? AND is_active = TRUE",
-            (character_id,)
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            f"FROM characters WHERE id = ? AND {filter_clause}",
+            query_params
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
@@ -81,26 +101,30 @@ class CharacterRepository:
         await conn.commit()
 
     async def get_active_characters_count(self) -> int:
-        """Возвращает общее количество активных персонажей для расчета страниц."""
         conn = self.db.connection
+        filter_clause, params = self._get_active_filter()
+
         cursor = await conn.execute(
-            "SELECT COUNT(id) FROM characters WHERE is_active = TRUE"
+            f"SELECT COUNT(id) FROM characters WHERE {filter_clause}",
+            params
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
     async def get_active_characters_paginated(self, limit: int, offset: int) -> list[dict]:
-        """Возвращает только нужную 'страницу' персонажей прямо из базы данных."""
         conn = self.db.connection
+        filter_clause, params = self._get_active_filter()
+        query_params = params + [limit, offset]
+
         cursor = await conn.execute(
-            """
+            f"""
             SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position 
             FROM characters 
-            WHERE is_active = TRUE 
+            WHERE {filter_clause} 
             ORDER BY position 
             LIMIT ? OFFSET ?
             """,
-            (limit, offset)
+            query_params
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
@@ -133,6 +157,8 @@ COMMON_RP_PROMPT = """
 [ЯЗЫК]
 СТРОГО ТОЛЬКО РУССКИЙ ЯЗЫК, КИРИЛЛИЦА. Категорически запрещено использовать английские слова, фразы, транслит или конструкции. Если ты случайно начал писать на английском — немедленно остановись и продолжи на русском.
 """
+
+
 # 🆕 ФУНКЦИЯ ЗАГРУЗКИ ИЗ JSON
 def load_dynamic_characters() -> list[dict]:
     """Загружает персонажей из JSON файлов в папке characters_data/"""
@@ -288,21 +314,14 @@ async def _ensure_schema(conn) -> None:
 async def seed_characters(db: Database) -> None:
     """
     Заполняет/обновляет БД персонажами.
-    🆕 ИСПРАВЛЕНО: ТЕПЕРЬ ОБЪЕДИНЯЕТ встроенных персонажей (включая котов!)
-    и персонажей из JSON. JSON имеет приоритет при совпадении slug.
+    Объединяет встроенных персонажей и персонажей из JSON. JSON имеет приоритет.
     """
     conn = db.connection
     await _ensure_schema(conn)
 
-    # 1. Берем за основу всех встроенных персонажей (КОТЫ В БЕЗОПАСНОСТИ)
     characters_to_seed = list(CHARACTER_SEED)
-
-    # 2. Загружаем динамических персонажей из папки
     dynamic_characters = load_dynamic_characters()
 
-    # 3. Объединяем: создаем словарь по slug.
-    # Если JSON-файл имеет такой же slug, он ПЕРЕЗАПИШЕТ встроенного (это фича для апдейтов).
-    # Если slug новый, он просто добавится в конец.
     seed_dict = {char["slug"]: char for char in characters_to_seed}
     for dyn_char in dynamic_characters:
         seed_dict[dyn_char["slug"]] = dyn_char
@@ -310,7 +329,7 @@ async def seed_characters(db: Database) -> None:
     characters_to_seed = list(seed_dict.values())
     seed_slugs = [char["slug"] for char in characters_to_seed]
 
-    logger.info(f"📂 Итоговый список для сидирования: {len(characters_to_seed)} персонажей (включая котов и JSON)")
+    logger.info(f"📂 Итоговый список для сидирования: {len(characters_to_seed)} персонажей")
 
     for char in characters_to_seed:
         cursor = await conn.execute(
@@ -341,7 +360,6 @@ async def seed_characters(db: Database) -> None:
             )
             logger.info("➕ Inserted character: %s", char["slug"])
 
-    # 4. Деактивируем ТОЛЬКО тех, кого нет в ОБЪЕДИНЕННОМ списке
     if seed_slugs:
         placeholders = ",".join("?" * len(seed_slugs))
         await conn.execute(
@@ -371,7 +389,6 @@ async def backfill_photos(db: Database, api) -> None:
     repo = CharacterRepository(db)
     characters = await repo.get_all_active()
 
-    # Отбираем только тех, у кого нет фото и есть slug
     pending = [c for c in characters if not c["photo_attachment"] and c["slug"]]
     total = len(pending)
 
@@ -387,22 +404,20 @@ async def backfill_photos(db: Database, api) -> None:
             logger.info("No local image for '%s', skipping", char["slug"])
             continue
 
-        # Пауза между загрузками (кроме самой первой), чтобы не спамить ВК
         if i > 0:
             logger.info("Waiting 2s before next upload...")
             await asyncio.sleep(2)
 
         logger.info("[%d/%d] Uploading %s to VK...", i + 1, total, image)
 
-        # Retry при flood control (error 9)
         for attempt in range(3):
             try:
                 attachment = await api.upload_photo(image)
                 await repo.update_photo(char["id"], attachment)
                 logger.info("Photo saved: %s -> %s", char["slug"], attachment)
-                break  # успех, переходим к следующему персонажу
+                break
             except VKAPIError as exc:
-                if exc.code == 9 and attempt < 2:  # flood control
+                if exc.code == 9 and attempt < 2:
                     wait = 5 * (attempt + 1)
                     logger.warning(
                         "Flood control during upload of %s, retry in %ss...",
@@ -413,4 +428,4 @@ async def backfill_photos(db: Database, api) -> None:
                     logger.error(
                         "Failed to upload %s after retries: %s", image, exc
                     )
-                    break  # не ретраим, переходим к следующему
+                    break

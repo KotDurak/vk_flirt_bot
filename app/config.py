@@ -12,15 +12,16 @@ class Settings(BaseSettings):
     longpoll_wait: int = 25
     db_path: str = "data/bot.db"
 
-    # Pydantic будет искать VK_BOT_LLM_PROVIDER (или просто оставь дефолт)
     llm_provider: str = "polza"
-
     payment_provider: str = "test"
     yookassa_shop_id: str = ""
     yookassa_secret_key: str = ""
     yookassa_return_url: str = "https://vk.com/"
     admin_ids: str = ""
     support_admin_id: int = 0
+
+    # 🆕 ДОБАВЛЯЕМ ЭТО ПОЛЕ: список разрешенных персонажей через запятую
+    allowed_chars: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="VK_BOT_",
