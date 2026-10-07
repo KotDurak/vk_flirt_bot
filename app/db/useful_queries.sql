@@ -34,3 +34,8 @@ WHERE referred_by IS NOT NULL;
 SELECT AVG(messages) as avg_balance
 FROM users
 WHERE messages > 0 AND id IN (SELECT DISTINCT user_id FROM messages);
+
+Подключаетесь по SSH.
+Запускаете SQLite: sqlite3 bot.db
+Включаете красивый вывод: .headers on и .mode column
+Копируете запрос из файла или пишете свой.
