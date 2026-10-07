@@ -62,7 +62,7 @@ async def run_bot() -> None:
             api_version=settings.api_version,
         )
 
-        # === 4. Загружаем картинки ===
+        # === 4. Загружаем картинки  ===
         await backfill_photos(db, api)
 
         # === 5. Очередь чата ===
