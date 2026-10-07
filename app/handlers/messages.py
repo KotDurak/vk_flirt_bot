@@ -230,7 +230,7 @@ async def handle_update(
         send_keyboard = get_main_menu_keyboard()
 
     # === СБРОС ===
-    elif text_lower in ("/reset") or cmd == "reset":
+    elif text_lower == "/reset" or cmd == "reset":
         current_char = await char_repo.get_user_character(user["id"])
         if current_char:
             await msg_repo.clear_history(user["id"], current_char["id"])
