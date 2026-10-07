@@ -11,17 +11,21 @@ def get_main_menu_keyboard() -> str:
     kb.add_button("⚡ Купить энергию", payload={"cmd": "buy"}, color="positive")
     kb.row()
 
-    # Второстепенные действия (по 2 в ряд для аккуратности на мобильных)
+    # Второстепенные действия
     kb.add_button("📊 Мой профиль", payload={"cmd": "profile"}, color="secondary")
     kb.add_button("🎁 Ввести промокод", payload={"cmd": "promo"}, color="secondary")
     kb.row()
 
-    # Служебные действия
-    kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
-    kb.add_button("🆘 Поддержка", payload={"cmd": "support"}, color="secondary") # <--- НОВАЯ КНОПКА
+    # 🆕 НОВАЯ КНОПКА РЕФЕРАЛЬНОЙ СИСТЕМЫ
+    kb.add_button("💸 Заработать энергию", payload={"cmd": "referral"}, color="secondary")
     kb.row()
 
-    # Опасное действие (отдельно, чтобы случайно не нажать)
+    # Служебные действия
+    kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
+    kb.add_button("🆘 Поддержка", payload={"cmd": "support"}, color="secondary")
+    kb.row()
+
+    # Опасное действие
     kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
 
     return kb.to_json()
@@ -219,6 +223,23 @@ def get_admin_ticket_actions_keyboard(ticket_id: int, page: int = 1) -> str:
     kb.row()
     # Навигация
     kb.add_button("⬅️ К списку", payload={"cmd": "admin_tickets", "page": page}, color="secondary")
+    kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
+
+    return kb.to_json()
+
+
+def get_referral_keyboard(referral_code: str) -> str:
+    """Клавиатура для шеринга реферального кода."""
+    kb = KeyboardBuilder(one_time=False, inline=True)
+
+    # Кнопка, которая попросит бота продублировать код текстом для удобного копирования
+    kb.add_button(
+        label=f"📋 Скопировать код: {referral_code}",
+        payload={"cmd": "copy_referral", "code": referral_code},
+        color="primary"
+    )
+
+    kb.row()
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
 
     return kb.to_json()

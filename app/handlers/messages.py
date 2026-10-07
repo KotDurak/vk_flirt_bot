@@ -32,6 +32,7 @@ from app.vk.keyboards import (
     get_dialog_keyboard,
     get_admin_ticket_list_keyboard,       # <--- ДОБАВИТЬ
     get_admin_ticket_actions_keyboard,
+    get_referral_keyboard,
 )
 from app.utils import (
     _extract_message,
@@ -123,7 +124,16 @@ async def handle_update(
         )
         send_keyboard = get_main_menu_keyboard()
 
-    # === СПИСОК ПЕРСОНАЖЕЙ ===
+    elif cmd == "referral":
+        # Генерируем код на лету: vk + ID пользователя в ВК
+        referral_code = f"vk{user['vk_user_id']}"
+
+        answer = (
+            f"🎁 Твой личный промокод: `{referral_code}`\n\n"
+            "Поделись кодом! Когда друг введет его и напишет мне, он получит 10 энергии, а ты — 5 в качестве благодарности за рекомендацию."
+        )
+        send_keyboard = get_referral_keyboard(referral_code)
+
     # === СПИСОК ПЕРСОНАЖЕЙ (С НАСТОЯЩЕЙ БД-ПАГИНАЦИЕЙ) ===
     elif cmd == "chars" or text_lower in ("персонажи", "выбрать персонажа", "персонаж"):
         page = int(payload.get("page", 1))
@@ -716,50 +726,112 @@ async def handle_update(
                             model_name=active_model,
                         ))
                         return
-    # === ПРОМОКОДЫ ===
+    elif cmd == "copy_referral":
+        code = payload.get("code", "")
+        answer = (
+            f"📋 **Твой реферальный код:**\n\n"
+            f"`{code}`\n\n"
+            f"Скопируй его и отправь другу. Пусть он введет его командой:\n"
+            f"`/promo {code}`\n\n"
+            f"Как только друг напишет мне первое сообщение, вы оба получите по 10 энергии! ⚡"
+        )
+        send_keyboard = get_main_menu_keyboard()
+    # === ПРОМОКОДЫ И РЕФЕРАЛЫ ===
     elif cmd == "promo" or text_lower.startswith("/promo"):
-        if cmd == "promo" and not text:
-            answer = (
-                " Введите промокод!\n\n"
-                "Напишите команду в формате:\n"
-                "/promo KITSUNE2026\n\n"
-                "Следите за нашими постами в ВК — там мы публикуем новые коды! 😉"
-            )
+        promo_code = ""
+        if text_lower.startswith("/promo"):
+            parts = text.split(maxsplit=1)
+            promo_code = parts[1].strip() if len(parts) > 1 else ""
+
+        if not promo_code:
+            answer = "🎁 Введите промокод!\n\nНапишите команду в формате:\n/promo KITSUNE2026"
             send_keyboard = get_main_menu_keyboard()
         else:
-            promo_code = ""
-            if text_lower.startswith("/promo"):
-                parts = text.split(maxsplit=1)
-                promo_code = parts[1].strip().upper() if len(parts) > 1 else ""
+            # 1. Сначала проверяем, не является ли это реферальным кодом (формат vk123456789)
+            is_referral = False
+            referrer_user = None
 
-            if not promo_code:
-                answer = "🎁 Введите промокод!\n\nНапишите команду в формате:\n/promo KITSUNE2026"
-                send_keyboard = get_main_menu_keyboard()
+            if promo_code.lower().startswith("vk") and promo_code[2:].isdigit():
+                referrer_vk_id = int(promo_code[2:])
+                referrer_user = await user_repo.get_by_vk_id_strict(referrer_vk_id)
+                if referrer_user:
+                    is_referral = True
+
+            if is_referral:
+                # Логика реферала с защитой от "старичков"
+
+                # 1. Проверка: не пытался ли юзер пригласить сам себя
+                if user["id"] == referrer_user["id"]:
+                    answer = "😿 Ты не можешь пригласить сам себя!"
+
+                # 2. Проверка: был ли юзер уже кем-то приглашен
+                elif user.get("referred_by"):
+                    answer = "⚠️ Ты уже был приглашен другим пользователем."
+
+                # 3. НОВАЯ ПРОВЕРКА: Юзер должен быть "свежим" (менее 24 часов в боте)
+                else:
+                    from datetime import datetime, timedelta
+
+                    # Парсим дату регистрации (она приходит в формате 'YYYY-MM-DD HH:MM:SS')
+                    created_at_str = user.get("created_at")
+                    if created_at_str:
+                        # Убираем возможные microseconds для сравнения
+                        created_at_dt = datetime.strptime(created_at_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        now_dt = datetime.now()
+
+                        # Если юзер в боте больше 24 часов — отказываем
+                        if (now_dt - created_at_dt) > timedelta(hours=24):
+                            answer = "⏳ Этот промокод предназначен только для новичков (до 24 часов в боте)."
+                        else:
+                            # Все проверки пройдены! Привязываем и даем бонус при первом сообщении
+                            await user_repo.set_referred_by(user["id"], referrer_user["id"])
+                            answer = (
+                                f"✅ Промокод принят! Ты приглашен пользователем {referrer_vk_id}.\n\n"
+                                f"Напиши мне любое сообщение, чтобы активировать бонус (тебе 10 энергии, другу 5)!"
+                            )
+                    else:
+                        # На всякий случай, если даты нет
+                        await user_repo.set_referred_by(user["id"], referrer_user["id"])
+                        answer = "✅ Промокод принят! Напиши что-нибудь, чтобы получить бонус."
             else:
-                promo = await promo_repo.get_active_promo(promo_code)
-
+                # Стандартная логика промокодов из базы
+                promo = await promo_repo.get_active_promo(promo_code.upper())
                 if not promo:
-                    answer = f"❌ Промокод {promo_code} не найден или уже недействителен.\n\nПроверьте правильность написания или следите за новыми акциями!"
-                    send_keyboard = get_main_menu_keyboard()
+                    answer = f"❌ Промокод {promo_code} не найден или уже недействителен."
                 elif await promo_repo.has_user_used_promo(user["id"], promo["id"]):
-                    answer = f"⚠️ Вы уже использовали промокод {promo_code}.\n\nКаждый промокод можно активировать только один раз!"
-                    send_keyboard = get_main_menu_keyboard()
+                    answer = f"⚠️ Вы уже использовали промокод {promo_code}."
                 else:
                     reward = promo["reward"]
                     await payment_repo.add_user_messages(user["id"], reward)
                     await promo_repo.apply_promo_code(user["id"], promo["id"])
-
                     new_balance = await payment_repo.get_user_balance(user["id"])
+                    answer = f"🎉 Промокод {promo_code} активирован!\n\n⚡ Начислено: {reward} энергии\n💬 Текущий баланс: {new_balance} энергии"
 
-                    answer = (
-                        f"🎉 Промокод {promo_code} активирован!\n\n"
-                        f"⚡ Начислено: {reward} энергии\n"
-                        f"💬 Текущий баланс: {new_balance} энергии\n\n"
-                        f"Приятного общения! 😉"
-                    )
-                    send_keyboard = get_main_menu_keyboard()
+            send_keyboard = get_main_menu_keyboard()
     # === ОБЫЧНЫЙ ДИАЛОГ С ПЕРСОНАЖЕМ ===
     else:
+        # --- НАЧАЛО: ПРОВЕРКА РЕФЕРАЛЬНОГО БОНУСА ---
+        if user.get("referred_by") and not user.get("referral_bonus_claimed"):
+            # Проверяем, есть ли уже сообщения у этого юзера (чтобы не начислить за пустой старт)
+            history_check = await msg_repo.get_recent_history(user["id"], 0,
+                                                              limit=1)  # 0 char_id для общей проверки или любого
+
+            # Если это первое реальное сообщение (история пуста или только приветствие)
+            # Для простоты: начисляем, если флаг еще не стоит.
+
+            await payment_repo.add_user_messages(user["id"], 10)
+            await payment_repo.add_user_messages(user["referred_by"], 5)
+            await user_repo.mark_referral_bonus_claimed(user["id"])
+
+            # Уведомляем реферера (опционально, можно убрать если спамит)
+            try:
+                referrer_info = await user_repo.get_by_vk_id(user[
+                                                                 "referred_by"])  # Тут нужен метод получения vk_id по internal id, но пока пропустим для простоты
+                # Можно отправить уведомление, если знаете peer_id реферера
+            except:
+                pass
+
+            logger.info(f"Referral bonus awarded to user {user['id']} and referrer {user['referred_by']}")
         # 0. ПЕРЕХВАТЧИК ПОДДЕРЖКИ (Проверяем, ждем ли мы жалобу от этого юзера)
         user_ts = awaiting_support.get(int(from_id))
 

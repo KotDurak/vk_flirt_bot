@@ -3,6 +3,17 @@ from app.db.connection import Database
 
 logger = logging.getLogger(__name__)
 
+
+async def _add_column_if_not_exists(conn, table: str, column: str, column_definition: str) -> None:
+    """Безопасно добавляет колонку, если её ещё нет."""
+    # Получаем список существующих колонок в таблице
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in await cursor.fetchall()]  # row[1] = имя колонки
+
+    if column not in columns:
+        logger.info(f"Adding column {column} to table {table}")
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_definition}")
+
 async def run_migrations(db: Database) -> None:
     """Создает необходимые таблицы с правильной структурой."""
     conn = db.connection
@@ -178,6 +189,15 @@ async def run_migrations(db: Database) -> None:
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_support_tickets_vk_user ON support_tickets(vk_user_id);
     """)
+
+    await _add_column_if_not_exists(
+        conn, "users", "referred_by",
+        "INTEGER REFERENCES users(id)"
+    )
+    await _add_column_if_not_exists(
+        conn, "users", "referral_bonus_claimed",
+        "BOOLEAN DEFAULT FALSE"
+    )
 
     await conn.commit()
     logger.info("Migrations completed successfully. Database is clean and ready.")
