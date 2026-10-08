@@ -4,9 +4,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
 import random
 import copy
+from typing import Any
 from difflib import SequenceMatcher
 
 from app.services.chat_queue import ChatTask
@@ -102,6 +102,99 @@ def _clean_response(text: str) -> str:
     return '\n\n'.join(lines).strip()
 
 
+# ==============================================================================
+# 🔥 ИЗОЛИРОВАННАЯ ОБРАБОТКА ФОТО (Single Responsibility Principle)
+# ==============================================================================
+async def _handle_photo_message(
+    task: ChatTask,
+    llm: Any,
+    api: VKApi,
+    msg_repo: Any,
+    payment_repo: PaymentRepository,
+) -> None:
+    """Обрабатывает сообщение с фото через Vision API, сохраняя контекст диалога."""
+    logger.info("📸 Processing photo for user %s", task.user_id)
+
+    char_name = task.char_dict.get("name", "Персонаж")
+    char_traits = task.char_dict.get("traits", "Добрый и отзывчивый персонаж.")
+
+    # 🔥 ПОЛУЧАЕМ КОНТЕКСТ: Последние 3 сообщения для сохранения стиля
+    recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=3)
+    context_text = ""
+    if recent_history:
+        context_lines = []
+        for msg in recent_history:
+            role = "Пользователь" if msg["role"] == "user" else char_name
+            # Обрезаем длинные сообщения, чтобы не раздувать промпт
+            content = msg.get("content", "")[:150]
+            context_lines.append(f"{role}: {content}")
+        context_text = "\n".join(context_lines)
+
+    user_text_part = (
+        f'И сказал при этом: "{task.text}"'
+        if task.text.strip()
+        else 'Пользователь не написал ничего, только прислал фото.'
+    )
+
+    vision_prompt = f"""Ты отыгрываешь персонажа: {char_name}.
+Твои черты: {char_traits}
+
+ПОСЛЕДНИЕ СООБЩЕНИЯ ДИАЛОГА (для сохранения стиля и контекста):
+{context_text if context_text else "(Диалог только начался)"}
+
+Пользователь прислал тебе фотографию.
+{user_text_part}
+
+Твоя задача: Опиши ЭМОЦИОНАЛЬНУЮ реакцию персонажа на это фото.
+КРИТИЧЕСКИ ВАЖНО: Сохраняй ТОТ ЖЕ СТИЛЬ, тон и формат, что и в предыдущих сообщениях диалога выше.
+
+СТРОГИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ:
+1. ДЕЙСТВИЯ: Всегда описывай действия в ТРЕТЬЕМ лице, используя имя персонажа (например: "*{char_name} прищуривается*", а НЕ "*Я прищуриваюсь*").
+2. РЕЧЬ: Прямая речь идет от первого лица через тире (—).
+3. Объем: Максимум 2-3 коротких предложения.
+4. Детали: Добавь 1-2 сенсорные детали (что персонаж чувствует, видит, слышит).
+5. Запрет: НИКОГДА не описывай фото как список объектов ("на фото изображен..."). Реагируй так, будто видишь это своими глазами.
+6. Финал: Закончи вопросом или действием, передающим инициативу пользователю."""
+
+    vision_result = await llm.analyze_image(
+        image_url=task.photo_url,
+        prompt=vision_prompt,
+    )
+
+    if vision_result.success and vision_result.content:
+        candidate_answer = _clean_response(vision_result.content)
+        candidate_answer = _truncate(candidate_answer)
+
+        # 🔥 ПРОВЕРКА НА ПЬЯНСТВО
+        is_drunk, drunk_reason = _is_drunk_response(candidate_answer)
+        if is_drunk:
+            logger.warning(f"🍸 Vision модель пьяна: {drunk_reason}. Используем фоллбэк.")
+            answer = f"*{char_name} моргает, разглядывая картинку, и тепло улыбается.* Ох, как интересно! Расскажешь об этом подробнее?"
+        else:
+            answer = candidate_answer
+
+        await msg_repo.add_message(task.user_id, task.char_id, "user", task.text or "[Отправил фото]")
+        await msg_repo.add_message(task.user_id, task.char_id, "assistant", answer)
+
+        await api.send_message(
+            peer_id=task.peer_id,
+            text=answer,
+            keyboard=getattr(task, 'keyboard', None),
+        )
+
+        if not task.text.startswith("[СИСТЕМНАЯ КОМАНДА"):
+            await payment_repo.use_message(task.user_id)
+
+        logger.info("🏁 FINISHED photo task for user=%s", task.user_id)
+    else:
+        logger.error(f"❌ Vision API failed: {vision_result.error_message}")
+        answer = f"*{char_name} прищуривается, пытаясь разглядеть детали.* Кажется, картинка не загрузилась, попробуй отправить ещё раз?"
+        await api.send_message(peer_id=task.peer_id, text=answer)
+
+
+# ==============================================================================
+# ОСНОВНОЙ РАБОЧИЙ ПРОЦЕСС
+# ==============================================================================
 async def process_chat_task(
         task: ChatTask,
         api: VKApi,
@@ -128,6 +221,14 @@ async def process_chat_task(
 
     llm = create_llm_client(session)
 
+    # 🔥 ЧИСТАЯ МАРШРУТИЗАЦИЯ: Если есть фото, делегируем и выходим
+    if getattr(task, 'photo_url', None):
+        await _handle_photo_message(task, llm, api, msg_repo, payment_repo)
+        return  # Завершаем задачу, фото обработано
+
+    # ========================================================================
+    # СТАНДАРТНАЯ ВЕТКА: ТЕКСТОВЫЙ ДИАЛОГ
+    # ========================================================================
     ERROR_MESSAGES = [
         "Ой, я немного задумалась... Попробуй написать ещё раз? 😊",
         "Хм, что-то меня отвлекло. Повтори, пожалуйста?",
@@ -149,7 +250,6 @@ async def process_chat_task(
 
         await asyncio.sleep(0.5)
 
-        # Базовый контекст (НЕ ТРОГАЕМ ЕГО В ЦИКЛЕ)
         base_messages = await build_llm_context(
             msg_repo=msg_repo, summary_repo=summary_repo,
             user_id=task.user_id, character_id=task.char_id,
@@ -164,7 +264,6 @@ async def process_chat_task(
         base_temperature = getattr(base_settings, 'temperature', 0.8) if base_settings else 0.8
 
         for attempt in range(MAX_REGEN_ATTEMPTS + 1):
-            # 🔥 БЕЗОПАСНО: Работаем с чистой копией на каждой итерации. Ничего не накапливается.
             messages_to_send = copy.deepcopy(base_messages)
 
             if attempt > 0 and base_settings is not None:
@@ -174,10 +273,9 @@ async def process_chat_task(
                 new_settings.temperature = increased_temp
                 llm._settings = new_settings
 
-                # 🔥 БЕЗОПАСНО: Добавляем короткую инструкцию в конец. Она имеет высший приоритет внимания.
                 messages_to_send.append({
                     "role": "system",
-                    "content": "[OOC: Предыдущий ответ отклонен за структурное повторение. Сохраняя текущее настроение сцены и характер персонажа, опиши реакцию через новую, свежую деталь (положение тела, взаимодействие с предметом или тихое действие), избегая ранее использованных формулировок.]"
+                    "content": "[OOC: Предыдущий ответ отклонен за структурное повторение. Сохраняя текущее настроение сцены и характер персонажа, опиши реакцию через новую, свежую деталь, избегая ранее использованных формулировок.]"
                 })
 
             try:
@@ -199,6 +297,20 @@ async def process_chat_task(
                 else:
                     char_name = task.char_dict.get("name", "Персонаж")
                     answer = f"*{char_name} задумчиво молчит, переводя взгляд на что-то новое вокруг.*"
+                    is_real_answer = True
+                    is_fallback = True
+                    break
+
+            # 🔥 ПРОВЕРКА НА ПЬЯНСТВО (Для текста)
+            is_drunk, drunk_reason = _is_drunk_response(candidate_answer)
+            if is_drunk:
+                if attempt < MAX_REGEN_ATTEMPTS:
+                    logger.warning(f"🍸 {drunk_reason}. Retrying with higher temperature...")
+                    continue
+                else:
+                    logger.warning("🚨 FATAL DRUNK: Model is speaking gibberish/foreign. Using safe fallback.")
+                    char_name = task.char_dict.get("name", "Персонаж")
+                    answer = f"*{char_name} смущенно моргает, явно потеряв нить разговора, и мягко переводит тему, заглядывая тебе в глаза.*"
                     is_real_answer = True
                     is_fallback = True
                     break
@@ -294,3 +406,33 @@ def _is_ai_refusal(text: str) -> bool:
         return True
 
     return False
+
+
+def _is_drunk_response(text: str) -> tuple[bool, str]:
+    """
+    🔥 ИСПРАВЛЕННАЯ ВЕРСИЯ: Ловит мусор даже в коротких строках.
+    """
+    if not text or not text.strip():
+        return False, ""
+
+    alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text))
+    total_len = len(text.strip())
+
+    # 🔥 ПРОВЕРКА НА МУСОР ПЕРВОЙ (даже для коротких строк!)
+    if total_len > 5 and alpha_count < 3:
+        return True, f"Пустой мусор (букв: {alpha_count}, длина: {total_len})"
+
+    # Для остальных проверок нужна минимальная длина
+    if total_len < 20:
+        return False, ""
+
+    cyrillic_count = len(re.findall(r'[а-яА-ЯёЁ]', text))
+
+    if alpha_count > 25 and cyrillic_count == 0:
+        return True, "Отсутствие кириллицы (DrunkSeek 3.2lv detected 🍸)"
+
+    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħĲİĬĮĸłÃÂ]', text))
+    if mojibake_chars > 5:
+        return True, "Обнаружена кодировочная каша (mojibake)"
+
+    return False, ""

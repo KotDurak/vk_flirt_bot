@@ -20,6 +20,7 @@ class ChatTask:
     keyboard: str | None = None
     is_regeneration: bool = False
     model_name: str | None = None
+    photo_url: str | None = None
 
 
 class ChatQueue:

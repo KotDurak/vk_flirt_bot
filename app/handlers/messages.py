@@ -82,6 +82,15 @@ async def handle_update(
     if message.get("action"):
         return
 
+    photo_url = None
+    if message.get("attachments"):
+        for att in message["attachments"]:
+            if att["type"] == "photo":
+                # Берем самое большое доступное разрешение
+                photo_url = att["photo"]["sizes"][-1]["url"]
+                break
+
+
     from_id = message.get("from_id") or message.get("user_id")
     peer_id = message.get("peer_id") or from_id
     if not peer_id:
@@ -928,7 +937,7 @@ async def handle_update(
             logger.info("⏭️ Skipping service/payload message: %s", text[:50])
             return
 
-        if not text:
+        if not text and not photo_url:
             answer = "Напиши мне что-нибудь, я умею не только молчать 😉"
             send_keyboard = get_main_menu_keyboard()
         else:
@@ -963,7 +972,8 @@ async def handle_update(
                     user_dict=user,
                     char_dict=current_char,
                     keyboard=get_regenerate_inline_keyboard(),
-                    model_name=active_model
+                    model_name=active_model,
+                    photo_url=photo_url
                 ))
                 return
 

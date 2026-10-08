@@ -178,3 +178,38 @@ class LLMRouterAI(LLMBase):
                 return LLMResult(success=False, error_code=0, error_message=str(exc))
 
         return LLMResult(success=False, error_code=0, error_message="Max retries exceeded")
+
+    async def analyze_image(
+            self,
+            image_url: str,
+            prompt: str,
+            model_override: str | None = None
+    ) -> LLMResult:
+        """
+        Анализирует изображение с помощью Vision-модели.
+        Не ломает основной generate, полностью изолирован.
+        """
+        target_model = model_override or self._settings.model_vision
+
+        logger.info(f"👁️ Vision request: model={target_model}, url={image_url[:50]}...")
+
+        # Формируем сообщение в формате OpenAI Vision API
+        vision_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ]
+            }
+        ]
+
+        # 🔥 МАГИЯ SOLID: Переиспользуем наш уже отлаженный метод с защитой от 429 и重试!
+        # Для vision нам не нужны сложные stop-токены чата, но базовый payload подойдет.
+        # Мы можем слегка переопределить параметры для vision, если нужно, но пока оставим как есть.
+        return await self._try_generate(
+            messages=vision_messages,
+            target_model=target_model,
+            max_retries=2,
+            is_fallback=False
+        )

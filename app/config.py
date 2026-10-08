@@ -51,6 +51,7 @@ class LLMSettings(BaseSettings):
     base_url: str = "https://api.polza.ai/v1"
     model: str = "thedrummer/skyfall-36b-v2"
     model_sfw: str = "meta-llama/llama-3.1-70b-instruct"
+    model_vision: str = "qwen/qwen2-vl-72b-instruct"
 
     # Дефолты для RouterAI (наша золотая середина)
     routerai_base_url: str = "https://routerai.ru/v1"

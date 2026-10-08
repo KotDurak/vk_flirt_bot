@@ -84,3 +84,11 @@ class LLMBase(ABC):
                 f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
         except Exception as e:
             logger.error(f"❌ Failed to write log: {e}")
+
+    async def analyze_image(
+            self,
+            image_url: str,
+            prompt: str,
+            model_override: str | None = None
+    ) -> LLMResult:
+        pass
