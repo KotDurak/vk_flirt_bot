@@ -1,87 +1,180 @@
-#!/usr/bin/env python3
-"""
-Скрипт восстановления неотвеченных сообщений.
-Версия 2: Группирует по пользователям, чтобы не создавать спам.
-"""
+# app/services/llm/routerai.py
+from __future__ import annotations
+
 import asyncio
+import json
 import logging
-import sys
-import os
+import time
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-sys.path.insert(0, project_root)
-
-from app.db.connection import Database
-from app.vk.api import VKApi
-from app.config import get_settings
 import aiohttp
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-logger = logging.getLogger("RECOVERY")
+from app.config import get_llm_settings
+from app.services.llm.base import LLMBase, LLMResult
+
+logger = logging.getLogger(__name__)
 
 
-async def recover():
-    settings = get_settings()
-    db = Database(settings.db_path)
-    await db.connect()
-    conn = db.connection
+class LLMRouterAI(LLMBase):
+    """
+    Клиент для RouterAI API (OpenAI-совместимый).
+    """
 
-    async with aiohttp.ClientSession() as session:
-        api = VKApi(session, settings.group_token)
+    _global_cooldown_until: float = 0.0
+    _consecutive_429_count: int = 0
 
-        # 🔥 ИСПРАВЛЕНИЕ: Группируем по user_id и character_id.
-        # Берем только MAX(id), то есть последнее неотвеченное сообщение от каждого юзера.
-        query = """
-            SELECT MAX(m.id) as msg_id, m.user_id, m.character_id, u.vk_user_id, c.name as char_name
-            FROM messages m
-            JOIN users u ON m.user_id = u.id
-            LEFT JOIN characters c ON m.character_id = c.id
-            WHERE m.role = 'user'
-              AND NOT EXISTS (
-                  SELECT 1 FROM messages m2 
-                  WHERE m2.user_id = m.user_id 
-                    AND m2.character_id = m.character_id 
-                    AND m2.role = 'assistant' 
-                    AND m2.id > m.id
-              )
-            GROUP BY m.user_id, m.character_id
-            LIMIT 30;
-        """
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        super().__init__(session)
+        self._settings = get_llm_settings()
+        self.base_url = getattr(self._settings, 'base_url', 'https://routerai.ru/api/v1')
+        self.api_key = getattr(self._settings, 'api_key', self._settings.api_key)
 
-        cursor = await conn.execute(query)
-        rows = await cursor.fetchall()
+    async def generate(
+            self,
+            messages: list[dict[str, str]],
+            max_retries: int = 2,
+            model_override: str | None = None
+    ) -> LLMResult:
+        primary_model = model_override or getattr(self._settings, 'model', 'qwen/qwen-2.5-72b-instruct')
+        fallback_model = getattr(self._settings, 'fallback_model', 'nousresearch/hermes-3-llama-3.1-70b')
 
-        if not rows:
-            logger.info("✅ Все сообщения обработаны. Нечего восстанавливать.")
-            return
+        result = await self._try_generate(messages, primary_model, max_retries)
 
-        logger.warning(f"⚠️ НАЙДЕНО {len(rows)} ПОЛЬЗОВАТЕЛЕЙ С ПРОПУЩЕННЫМИ СООБЩЕНИЯМИ. ЗАПУСКАЕМ СПАСЕНИЕ...")
+        # Если основная модель упала, пробуем fallback (это стандартная логика)
+        if not result.success and (result.error_code >= 400 or result.error_code in [0, 200]):
+            logger.warning(f"⚠️ Primary model {primary_model} failed (code {result.error_code}). Switching to fallback: {fallback_model}")
+            result = await self._try_generate(messages, fallback_model, max_retries, is_fallback=True)
 
-        for row in rows:
-            vk_peer_id = row['vk_user_id']
-            char_name = row['char_name'] or "Персонаж"
+        return result
 
-            # 🔥 ЕДИНОЕ сообщение-восстановление вместо спама
-            safe_answer = f"*{char_name} моргает, словно выходя из транса, и виновато улыбается.* Прости, я немного зависла и пропустила твои сообщения. Я здесь! Напомни, на чем мы остановились?"
+    async def _try_generate(
+            self,
+            messages: list[dict[str, str]],
+            target_model: str,
+            max_retries: int,
+            is_fallback: bool = False
+    ) -> LLMResult:
+        prefix = "🔄 FALLBACK" if is_fallback else "🚀"
+        logger.info(f"{prefix} RouterAI request: model=%s, msgs=%d", target_model, len(messages))
+
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": target_model,
+            "messages": messages,
+            "max_tokens": self._settings.max_tokens,
+            "temperature": 0.75,
+            "top_p": 0.95,
+            "min_p": 0.05,
+            "repetition_penalty": 1.08,
+            "frequency_penalty": 0.1,
+            "presence_penalty": 0.05,
+            # Ровно 4 элемента, чтобы API (включая Polza) не возвращал 400 ошибку
+            "stop": ["User:", "Пользователь:", "[СИСТЕМА", "[SYSTEM"],
+            "safe_prompt": False
+        }
+
+        for attempt in range(max_retries):
+            now = time.time()
+            if now < LLMRouterAI._global_cooldown_until:
+                wait_time = LLMRouterAI._global_cooldown_until - now
+                logger.warning("🛑 RouterAI cooldown active. Waiting %.1fs...", wait_time)
+                await asyncio.sleep(wait_time)
 
             try:
-                await api.send_message(peer_id=vk_peer_id, text=safe_answer)
-                logger.info(f"✅ Отправлено одно сообщение-восстановление пользователю {vk_peer_id}")
+                async with self._session.post(
+                        url, json=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=120)
+                ) as response:
+                    body = await response.text()
+                    if response.status == 200:
+                        data = json.loads(body)
+                        choices = data.get("choices", [])
+                        usage = data.get("usage", {})
 
-                # Закрываем цикл в БД, чтобы скрипт не нашел их снова
-                insert_query = """
-                    INSERT INTO messages (user_id, character_id, role, content)
-                    VALUES (?, ?, 'assistant', ?);
-                """
-                await conn.execute(insert_query, (row['user_id'], row['character_id'], safe_answer))
-                await conn.commit()
+                        if not choices:
+                            logger.warning(f"⚠️ Empty choices! Full response: {body[:1000]}")
+                            return LLMResult(success=False, error_code=200, error_message="Empty choices")
 
-            except Exception as e:
-                logger.error(f"❌ Ошибка при восстановлении для {vk_peer_id}: {e}")
+                        # 🔥 КРИТИЧЕСКИЙ ФИКС: Защита от NoneType, которая чинит твой прод
+                        raw_content = choices[0].get("message", {}).get("content")
+                        content = raw_content if raw_content is not None else ""
+                        finish_reason = choices[0].get("finish_reason")
 
-    logger.info("🏁 Процесс восстановления завершен.")
+                        # Если ответ пустой или слишком короткий, форсируем ошибку,
+                        # чтобы chat_worker.py мог перехватить это и вызвать Polza
+                        if len(content.strip()) < 40:
+                            logger.warning(f"🚨 Ответ слишком короткий или пустой ({len(content.strip())} симв.). Форсируем fallback!")
+                            return LLMResult(success=False, error_code=200, error_message="short_response")
 
+                        result = LLMResult(success=True, content=content.strip())
 
-if __name__ == "__main__":
-    asyncio.run(recover())
+                        if logger.isEnabledFor(logging.INFO):
+                            self.log(messages, target_model, payload, content, usage)
+
+                        logger.info("✅ RouterAI response: finish_reason=%s, chars=%d", finish_reason, len(content))
+
+                        if finish_reason == "length":
+                            logger.warning("⚠️ Response cut off by max_tokens!")
+
+                        return result
+
+                    if response.status == 429:
+                        LLMRouterAI._consecutive_429_count += 1
+                        logger.warning("⚠️ RouterAI 429 received. Consecutive: %d", LLMRouterAI._consecutive_429_count)
+
+                        if LLMRouterAI._consecutive_429_count >= 2:
+                            cooldown_seconds = 60.0
+                            LLMRouterAI._global_cooldown_until = time.time() + cooldown_seconds
+                            logger.error("🚨 %d consecutive 429 on RouterAI! Cooldown %.0fs.", LLMRouterAI._consecutive_429_count, cooldown_seconds)
+                            return LLMResult(success=False, error_code=429, error_message="Rate limit exceeded")
+
+                        wait_time = 15.0
+                        logger.warning("RouterAI API 429 (attempt %d/%d). Waiting %.1fs...", attempt + 1, max_retries, wait_time)
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                    if response.status == 400:
+                        logger.error("RouterAI 400 error: %s", body[:500])
+                        return LLMResult(success=False, error_code=400, error_message="context_too_long")
+
+                    logger.error("RouterAI error %s: %s", response.status, body[:500])
+                    return LLMResult(success=False, error_code=response.status, error_message=body[:500])
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning("RouterAI Network error (attempt %d/%d): %s", attempt + 1, max_retries, exc)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(15.0)
+                    continue
+                return LLMResult(success=False, error_code=0, error_message=str(exc))
+
+        return LLMResult(success=False, error_code=0, error_message="Max retries exceeded")
+
+    async def analyze_image(
+            self,
+            image_url: str,
+            prompt: str,
+            model_override: str | None = None
+    ) -> LLMResult:
+        target_model = model_override or self._settings.model_vision
+        logger.info(f"👁️ Vision request: model={target_model}, url={image_url[:50]}...")
+
+        vision_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ]
+            }
+        ]
+
+        return await self._try_generate(
+            messages=vision_messages,
+            target_model=target_model,
+            max_retries=2,
+            is_fallback=False
+        )

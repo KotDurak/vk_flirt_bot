@@ -399,9 +399,34 @@ async def process_chat_task(
         logger.exception("💥 CRITICAL error in chat worker")
 
     # ========================================================================
-    # 🔥 ПОСЛЕДНИЙ РУБЕЖ ОБОРОНЫ: ГАРАНТИРОВАННЫЙ ОТВЕТ ПОЛЬЗОВАТЕЛЮ
+    # 🔥 ПОСЛЕДНИЙ РУБЕЖ ОБОРОНЫ: ГАРАНТИРОВАННЫЙ ОТВЕТ ПОЛЬЗОВАТЕЛЮ + ТЕСТ POLZA
     # ========================================================================
     try:
+        # 🔥 ТЕСТОВАЯ ЗАГЛУШКА: Если админ пишет "тест полза", форсируем вызов Polza
+        is_debug_force_polza = get_settings().is_admin(
+            task.user_dict['vk_user_id']) and "тест полза" in task.text.lower()
+
+        if not is_real_answer or is_debug_force_polza:
+            if is_debug_force_polza:
+                logger.info("🧪 [DEBUG] Принудительный вызов Polza AI по команде админа")
+            else:
+                logger.info("🚨 Основной провайдер упал. Пытаемся перехватить ERROR_MESSAGES через Polza...")
+
+            polza_answer = await _rescue_with_polza(
+                session,
+                base_messages,
+                get_llm_settings()
+            )
+
+            if polza_answer:
+                answer = polza_answer
+                is_real_answer = True
+                logger.info("✅ Polza AI успешно перехватил фоллбэк!")
+            else:
+                logger.warning("💥 Polza AI тоже не смог. Возвращаем стандартный ERROR_MESSAGES.")
+                if not answer or not answer.strip():
+                    answer = random.choice(ERROR_MESSAGES)
+
         # 1. Если ответа всё ещё нет (или он пустой), генерируем безопасную ролевую заглушку.
         if not answer or not answer.strip():
             char_name = task.char_dict.get("name", "Персонаж")
@@ -479,21 +504,23 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
     if not text or not text.strip():
         return False, ""
 
-    alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text))
-    total_len = len(text.strip())
+    text_stripped = text.strip()
+    total_len = len(text_stripped)
+    alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text_stripped))
+    cyrillic_count = len(re.findall(r'[а-яА-ЯёЁ]', text_stripped))
+
+    # 🔥 Ловим артефакты токенизатора (Ġ = \u0120, Ċ = \u010a)
+    tokenizer_artifacts = len(re.findall(r'[\u0120\u010a]', text_stripped))
+    if tokenizer_artifacts > 2:
+        return True, f"Обнаружен сбой токенизатора (Tokenizer leak): {tokenizer_artifacts} артефактов"
 
     if total_len > 5 and alpha_count < 3:
         return True, f"Пустой мусор (букв: {alpha_count}, длина: {total_len})"
 
-    if total_len < 20:
-        return False, ""
+    if total_len >= 20 and alpha_count > 25 and cyrillic_count == 0:
+        return True, "Отсутствие кириллицы (DrunkSeek detected)"
 
-    cyrillic_count = len(re.findall(r'[а-яА-ЯёЁ]', text))
-
-    if alpha_count > 25 and cyrillic_count == 0:
-        return True, "Отсутствие кириллицы (DrunkSeek 3.2lv detected 🍸)"
-
-    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħĲİĬĮĸłÃÂ]', text))
+    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħĲİĬĮĸłÃÂ\u0120\u010a]', text_stripped))
     if mojibake_chars > 5:
         return True, "Обнаружена кодировочная каша (mojibake)"
 
