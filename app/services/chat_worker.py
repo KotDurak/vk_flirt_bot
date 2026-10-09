@@ -54,7 +54,6 @@ async def _rescue_with_polza(session, messages, settings) -> str | None:
         polza_client._settings = polza_settings
 
         # Копируем сообщения и добавляем строгий приказ не ломать роль
-        # Используем "Instruction" вместо "System", чтобы не триггерить стоп-токен "[SYSTEM"
         messages_copy = copy.deepcopy(messages)
         messages_copy.append({
             "role": "system",
@@ -400,40 +399,36 @@ async def process_chat_task(
         logger.exception("💥 CRITICAL error in chat worker")
 
     # ========================================================================
-    # 🔥 ФИНАЛЬНЫЙ ПЕРЕХВАТ И ОТПРАВКА
+    # 🔥 ПОСЛЕДНИЙ РУБЕЖ ОБОРОНЫ: ГАРАНТИРОВАННЫЙ ОТВЕТ ПОЛЬЗОВАТЕЛЮ
     # ========================================================================
     try:
-        # Безопасный триггер: работает всегда при сбое, ИЛИ принудительно для админа по ключевому слову
-        is_debug_force_polza = get_settings().is_admin(
-            task.user_dict['vk_user_id']) and "тест полза" in task.text.lower()
+        # 1. Если ответа всё ещё нет (или он пустой), генерируем безопасную ролевую заглушку.
+        if not answer or not answer.strip():
+            char_name = task.char_dict.get("name", "Персонаж")
+            answer = f"*{char_name} на мгновение замерла, словно обдумывая твои слова, и мягко перевела тему, заглянув тебе в глаза.*"
+            logger.warning("⚠️ SAFETY NET: Пустой ответ заменен на безопасную ролевую паузу.")
 
-        if not is_real_answer or is_debug_force_polza:
-            if is_debug_force_polza:
-                logger.info("🧪 [DEBUG] Принудительный вызов Polza AI по команде админа")
-            else:
-                logger.info("🚨 Основной провайдер упал. Пытаемся перехватить ERROR_MESSAGES через Polza...")
+        # 2. Отправка с защитой от временных сбоев ВК (Error 10)
+        max_send_attempts = 2
+        for send_attempt in range(max_send_attempts):
+            try:
+                await api.send_message(
+                    peer_id=int(task.peer_id),
+                    text=answer,
+                    keyboard=getattr(task, 'keyboard', None),
+                    attachment=getattr(task, 'attachment', None),
+                )
+                break  # Успешно отправлено, выходим из цикла повторных попыток
 
-            polza_answer = await _rescue_with_polza(
-                session,
-                base_messages,
-                get_llm_settings()
-            )
+            except Exception as vk_err:
+                logger.error(f"🚨 VK Send attempt {send_attempt + 1} failed for user {task.user_id}: {vk_err}")
+                if send_attempt == max_send_attempts - 1:
+                    logger.critical(
+                        f"💥 FAILED TO SEND MESSAGE TO USER {task.user_id} AFTER {max_send_attempts} ATTEMPTS")
+                else:
+                    await asyncio.sleep(2)  # Ждем 2 секунды перед повторной попыткой
 
-            if polza_answer:
-                answer = polza_answer
-                is_real_answer = True
-                logger.info("✅ Polza AI успешно перехватил фоллбэк!")
-            else:
-                logger.warning("💥 Polza AI тоже не смог. Возвращаем стандартный ERROR_MESSAGES.")
-                if not answer or not answer.strip():
-                    answer = random.choice(ERROR_MESSAGES)
-
-        await api.send_message(
-            peer_id=task.peer_id,
-            text=answer,
-            keyboard=getattr(task, 'keyboard', None),
-        )
-
+        # 3. Логика списания энергии
         if not is_start_message and is_real_answer and not is_regeneration and not get_settings().is_admin(
                 task.user_dict['vk_user_id']):
             success = await payment_repo.use_message(task.user_id)
@@ -450,7 +445,7 @@ async def process_chat_task(
             logger.info("♻️ Regeneration completed successfully. Energy was already deducted in handle_update.")
 
     except Exception:
-        logger.exception("Failed to send message to user %s", task.user_id)
+        logger.exception("💥 CRITICAL: Полный крах при отправке сообщения пользователю %s", task.user_id)
 
     logger.info("🏁 FINISHED task for user=%s", task.user_id)
 

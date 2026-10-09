@@ -123,7 +123,7 @@ class LLMRouterAI(LLMBase):
                                 error_message="Empty choices - likely hit stop token or filtered"
                             )
 
-                        # 🔥 БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ: Если API вернул null, делаем его пустой строкой
+                        # 🔥 КРИТИЧЕСКИЙ ФИКС: Защита от NoneType при краше API
                         raw_content = choices[0].get("message", {}).get("content")
                         content = raw_content if raw_content is not None else ""
                         finish_reason = choices[0].get("finish_reason")
@@ -131,10 +131,8 @@ class LLMRouterAI(LLMBase):
                         # 🔥 ФИКС: Если ответ слишком короткий или пустой, считаем это ошибкой,
                         # чтобы корректно сработал fallback (включая Polza)!
                         if len(content.strip()) < 40:
-                            logger.warning(
-                                f"🚨 Ответ слишком короткий или пустой ({len(content.strip())} симв.). Форсируем fallback!")
-                            return LLMResult(success=False, error_code=200,
-                                             error_message="short_response_forced_fallback")
+                            logger.warning(f"🚨 Ответ слишком короткий или пустой ({len(content.strip())} симв.). Форсируем fallback!")
+                            return LLMResult(success=False, error_code=200, error_message="short_response_forced_fallback")
 
                         result = LLMResult(success=True, content=content.strip())
 
@@ -215,8 +213,6 @@ class LLMRouterAI(LLMBase):
         ]
 
         # 🔥 МАГИЯ SOLID: Переиспользуем наш уже отлаженный метод с защитой от 429 и重试!
-        # Для vision нам не нужны сложные stop-токены чата, но базовый payload подойдет.
-        # Мы можем слегка переопределить параметры для vision, если нужно, но пока оставим как есть.
         return await self._try_generate(
             messages=vision_messages,
             target_model=target_model,
