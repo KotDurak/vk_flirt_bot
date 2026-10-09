@@ -89,7 +89,7 @@ class LLMRouterAI(LLMBase):
             "repetition_penalty": 1.08,
             "frequency_penalty": 0.1,
             "presence_penalty": 0.05,
-            "stop": ["P.S", "@id", "User:", "Пользователь:", "[СИСТЕМА", "[SYSTEM"],
+            "stop": ["User:", "Пользователь:", "[СИСТЕМА", "[SYSTEM"],
             "safe_prompt": False
         }
 
@@ -123,8 +123,18 @@ class LLMRouterAI(LLMBase):
                                 error_message="Empty choices - likely hit stop token or filtered"
                             )
 
-                        content = choices[0].get("message", {}).get("content", "")
+                        # 🔥 БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ: Если API вернул null, делаем его пустой строкой
+                        raw_content = choices[0].get("message", {}).get("content")
+                        content = raw_content if raw_content is not None else ""
                         finish_reason = choices[0].get("finish_reason")
+
+                        # 🔥 ФИКС: Если ответ слишком короткий или пустой, считаем это ошибкой,
+                        # чтобы корректно сработал fallback (включая Polza)!
+                        if len(content.strip()) < 40:
+                            logger.warning(
+                                f"🚨 Ответ слишком короткий или пустой ({len(content.strip())} симв.). Форсируем fallback!")
+                            return LLMResult(success=False, error_code=200,
+                                             error_message="short_response_forced_fallback")
 
                         result = LLMResult(success=True, content=content.strip())
 

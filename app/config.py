@@ -60,6 +60,11 @@ class LLMSettings(BaseSettings):
     model_summary: str = "nousresearch/hermes-3-llama-3.1-70b"
     fallback_model: str = "nousresearch/hermes-3-llama-3.1-70b"
 
+    # 🔥 НОВЫЕ ПОЛЯ ДЛЯ FALLBACK (POLZA)
+    polza_api_key: str = ""
+    polza_base_url: str = "https://api.polza.ai/v1"
+    polza_model: str = "deepseek/deepseek-v3.2"
+
     max_tokens: int = 800
     temperature: float = 0.85  # 🔥 Безопасный баланс креатива и контроля
 

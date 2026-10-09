@@ -14,11 +14,62 @@ from app.services.llm import create_llm_client
 from app.services.memory import maybe_generate_summary, build_llm_context
 from app.db.repositories.payments import PaymentRepository
 from app.vk.api import VKApi
-from app.config import get_settings
+from app.config import get_settings, get_llm_settings
 
 logger = logging.getLogger(__name__)
 
 MAX_REGEN_ATTEMPTS = 2
+
+
+# ==============================================================================
+# 🔥 СПАСАТЕЛЬНЫЙ КРУГ: POLZA AI FALLBACK
+# ==============================================================================
+async def _rescue_with_polza(session, messages, settings) -> str | None:
+    """Пытается получить ответ от Polza AI, чтобы перехватить ERROR_MESSAGES."""
+    if not messages:
+        return None
+
+    # Защита: если ключи Polza не настроены, не пытаемся даже стучаться
+    if not getattr(settings, 'polza_api_key', None):
+        logger.warning("⚠️ Polza API key not configured. Skipping rescue.")
+        return None
+
+    try:
+        from app.services.llm.routerai import LLMRouterAI
+
+        # Создаем настройки для Polza на лету
+        polza_settings = type('PolzaSettings', (), {
+            'api_key': settings.polza_api_key,
+            'base_url': settings.polza_base_url,
+            'model': settings.polza_model,
+            'max_tokens': settings.max_tokens,
+            'temperature': settings.temperature
+        })()
+
+        polza_client = LLMRouterAI(session)
+
+        # 🔥 КРИТИЧЕСКИЙ ФИКС: Перезаписываем атрибуты, которые __init__ захватил от RouterAI
+        polza_client.base_url = settings.polza_base_url
+        polza_client.api_key = settings.polza_api_key
+        polza_client._settings = polza_settings
+
+        # Копируем сообщения и добавляем строгий приказ не ломать роль
+        # Используем "Instruction" вместо "System", чтобы не триггерить стоп-токен "[SYSTEM"
+        messages_copy = copy.deepcopy(messages)
+        messages_copy.append({
+            "role": "system",
+            "content": "[Instruction: Previous output failed or was truncated. CRITICAL: Stay strictly in character, do not break the fourth wall, continue the scene naturally in Russian.]"
+        })
+
+        result = await polza_client.generate(messages_copy)
+
+        # Если Polza вернул нормальный текст — спасаем ситуацию
+        if result.success and result.content and len(result.content.strip()) > 20:
+            return _clean_response(_truncate(result.content))
+
+    except Exception as e:
+        logger.error(f"💥 Polza rescue failed: {e}")
+    return None
 
 
 def _truncate(value: str, limit: int = 1500) -> str:
@@ -27,7 +78,8 @@ def _truncate(value: str, limit: int = 1500) -> str:
     return value[: limit - 1] + "…"
 
 
-def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[bool, list[str]]:
+def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[
+    bool, list[str]]:
     """Детектор зацикливания: ловит копипаст и повторяющиеся действия."""
     if len(recent_assistant_msgs) < 2:
         return False, []
@@ -103,29 +155,26 @@ def _clean_response(text: str) -> str:
 
 
 # ==============================================================================
-# 🔥 ИЗОЛИРОВАННАЯ ОБРАБОТКА ФОТО (Single Responsibility Principle)
+# 🔥 ИЗОЛИРОВАННАЯ ОБРАБОТКА ФОТО
 # ==============================================================================
 async def _handle_photo_message(
-    task: ChatTask,
-    llm: Any,
-    api: VKApi,
-    msg_repo: Any,
-    payment_repo: PaymentRepository,
+        task: ChatTask,
+        llm: Any,
+        api: VKApi,
+        msg_repo: Any,
+        payment_repo: PaymentRepository,
 ) -> None:
-    """Обрабатывает сообщение с фото через Vision API, сохраняя контекст диалога."""
     logger.info("📸 Processing photo for user %s", task.user_id)
 
     char_name = task.char_dict.get("name", "Персонаж")
     char_traits = task.char_dict.get("traits", "Добрый и отзывчивый персонаж.")
 
-    # 🔥 ПОЛУЧАЕМ КОНТЕКСТ: Последние 3 сообщения для сохранения стиля
     recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=3)
     context_text = ""
     if recent_history:
         context_lines = []
         for msg in recent_history:
             role = "Пользователь" if msg["role"] == "user" else char_name
-            # Обрезаем длинные сообщения, чтобы не раздувать промпт
             content = msg.get("content", "")[:150]
             context_lines.append(f"{role}: {content}")
         context_text = "\n".join(context_lines)
@@ -149,11 +198,11 @@ async def _handle_photo_message(
 КРИТИЧЕСКИ ВАЖНО: Сохраняй ТОТ ЖЕ СТИЛЬ, тон и формат, что и в предыдущих сообщениях диалога выше.
 
 СТРОГИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ:
-1. ДЕЙСТВИЯ: Всегда описывай действия в ТРЕТЬЕМ лице, используя имя персонажа (например: "*{char_name} прищуривается*", а НЕ "*Я прищуриваюсь*").
+1. ДЕЙСТВИЯ: Всегда описывай действия в ТРЕТЬЕМ лице, используя имя персонажа.
 2. РЕЧЬ: Прямая речь идет от первого лица через тире (—).
 3. Объем: Максимум 2-3 коротких предложения.
-4. Детали: Добавь 1-2 сенсорные детали (что персонаж чувствует, видит, слышит).
-5. Запрет: НИКОГДА не описывай фото как список объектов ("на фото изображен..."). Реагируй так, будто видишь это своими глазами.
+4. Детали: Добавь 1-2 сенсорные детали.
+5. Запрет: НИКОГДА не описывай фото как список объектов.
 6. Финал: Закончи вопросом или действием, передающим инициативу пользователю."""
 
     vision_result = await llm.analyze_image(
@@ -165,7 +214,6 @@ async def _handle_photo_message(
         candidate_answer = _clean_response(vision_result.content)
         candidate_answer = _truncate(candidate_answer)
 
-        # 🔥 ПРОВЕРКА НА ПЬЯНСТВО
         is_drunk, drunk_reason = _is_drunk_response(candidate_answer)
         if is_drunk:
             logger.warning(f"🍸 Vision модель пьяна: {drunk_reason}. Используем фоллбэк.")
@@ -221,10 +269,9 @@ async def process_chat_task(
 
     llm = create_llm_client(session)
 
-    # 🔥 ЧИСТАЯ МАРШРУТИЗАЦИЯ: Если есть фото, делегируем и выходим
     if getattr(task, 'photo_url', None):
         await _handle_photo_message(task, llm, api, msg_repo, payment_repo)
-        return  # Завершаем задачу, фото обработано
+        return
 
     # ========================================================================
     # СТАНДАРТНАЯ ВЕТКА: ТЕКСТОВЫЙ ДИАЛОГ
@@ -235,10 +282,13 @@ async def process_chat_task(
         "Прости, я на секунду потеряла мысль. Что ты говорил?",
     ]
 
-    answer = random.choice(ERROR_MESSAGES)
+    answer = ""
     is_real_answer = False
     is_fallback = False
     candidate_answer = ""
+
+    # Безопасная инициализация, чтобы избежать ошибок области видимости
+    base_messages = []
 
     try:
         await maybe_generate_summary(
@@ -301,7 +351,6 @@ async def process_chat_task(
                     is_fallback = True
                     break
 
-            # 🔥 ПРОВЕРКА НА ПЬЯНСТВО (Для текста)
             is_drunk, drunk_reason = _is_drunk_response(candidate_answer)
             if is_drunk:
                 if attempt < MAX_REGEN_ATTEMPTS:
@@ -350,11 +399,34 @@ async def process_chat_task(
     except Exception:
         logger.exception("💥 CRITICAL error in chat worker")
 
+    # ========================================================================
+    # 🔥 ФИНАЛЬНЫЙ ПЕРЕХВАТ И ОТПРАВКА
+    # ========================================================================
     try:
-        if not answer or not answer.strip():
-            logger.error("🚨 CRITICAL SAFETY NET: Answer is empty right before VK API call! Forcing fallback.")
-            answer = random.choice(ERROR_MESSAGES)
-            is_real_answer = False
+        # Безопасный триггер: работает всегда при сбое, ИЛИ принудительно для админа по ключевому слову
+        is_debug_force_polza = get_settings().is_admin(
+            task.user_dict['vk_user_id']) and "тест полза" in task.text.lower()
+
+        if not is_real_answer or is_debug_force_polza:
+            if is_debug_force_polza:
+                logger.info("🧪 [DEBUG] Принудительный вызов Polza AI по команде админа")
+            else:
+                logger.info("🚨 Основной провайдер упал. Пытаемся перехватить ERROR_MESSAGES через Polza...")
+
+            polza_answer = await _rescue_with_polza(
+                session,
+                base_messages,
+                get_llm_settings()
+            )
+
+            if polza_answer:
+                answer = polza_answer
+                is_real_answer = True
+                logger.info("✅ Polza AI успешно перехватил фоллбэк!")
+            else:
+                logger.warning("💥 Polza AI тоже не смог. Возвращаем стандартный ERROR_MESSAGES.")
+                if not answer or not answer.strip():
+                    answer = random.choice(ERROR_MESSAGES)
 
         await api.send_message(
             peer_id=task.peer_id,
@@ -409,20 +481,15 @@ def _is_ai_refusal(text: str) -> bool:
 
 
 def _is_drunk_response(text: str) -> tuple[bool, str]:
-    """
-    🔥 ИСПРАВЛЕННАЯ ВЕРСИЯ: Ловит мусор даже в коротких строках.
-    """
     if not text or not text.strip():
         return False, ""
 
     alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text))
     total_len = len(text.strip())
 
-    # 🔥 ПРОВЕРКА НА МУСОР ПЕРВОЙ (даже для коротких строк!)
     if total_len > 5 and alpha_count < 3:
         return True, f"Пустой мусор (букв: {alpha_count}, длина: {total_len})"
 
-    # Для остальных проверок нужна минимальная длина
     if total_len < 20:
         return False, ""
 
