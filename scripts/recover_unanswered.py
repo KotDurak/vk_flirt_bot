@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
 Скрипт восстановления неотвеченных сообщений.
-Использует точную схему БД проекта.
+Финальная версия с корректной инициализацией VKApi и БД.
 """
 import asyncio
 import logging
 import sys
 import os
 
-# 🔥 КРИТИЧЕСКИЙ ФИКС: Добавляем корень проекта в пути Python,
-# чтобы импорт 'from app...' работал корректно при запуске из папки scripts.
+# Добавляем корень проекта в пути Python
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
-# Теперь импорты будут работать без ошибок
 from app.db.connection import Database
 from app.vk.api import VKApi
 from app.config import get_settings
@@ -27,16 +25,16 @@ logger = logging.getLogger("RECOVERY")
 async def recover():
     settings = get_settings()
 
-    # Инициализация БД (адаптировано под стандартную структуру твоего проекта)
-    db = Database()
+    # Инициализация БД
+    db = Database(settings.db_path)
     await db.connect()
     conn = db.connection
 
+    # 🔥 ПРАВИЛЬНАЯ ИНИЦИАЛИЗАЦИЯ VKApi: session ПЕРВЫМ аргументом
     async with aiohttp.ClientSession() as session:
-        api = VKApi(settings.group_token, session)
+        api = VKApi(session, settings.group_token)
 
-        # Запрос ищет сообщения пользователя, после которых НЕТ сообщения assistant
-        # с тем же user_id и character_id и с большим id.
+        # Запрос ищет сообщения пользователя, после которых НЕТ ответа assistant
         query = """
             SELECT m.id as msg_id, m.user_id, m.character_id, m.content, u.vk_user_id, c.name as char_name
             FROM messages m
@@ -59,7 +57,6 @@ async def recover():
 
         if not rows:
             logger.info("✅ Все сообщения обработаны. Нечего восстанавливать.")
-            await db.disconnect()
             return
 
         logger.warning(f"⚠️ НАЙДЕНО {len(rows)} ПРОПУЩЕННЫХ СООБЩЕНИЙ. ЗАПУСКАЕМ СПАСЕНИЕ...")
@@ -69,15 +66,14 @@ async def recover():
             user_text = row['content'][:40] + "..." if len(row['content']) > 40 else row['content']
             char_name = row['char_name'] or "Персонаж"
 
-            # Безопасная ролевая заглушка, которая не ломает иммерсию
             safe_answer = f"*{char_name} вздыхает, потирая виски, словно вернувшись из глубоких раздумий.* Прости, я немного отвлеклась. Ты говорил что-то важное про «{user_text}»? Продолжай, я внимательно слушаю."
 
             try:
-                # 1. Отправляем сообщение пользователю
+                # Отправляем сообщение пользователю
                 await api.send_message(peer_id=vk_peer_id, text=safe_answer)
                 logger.info(f"✅ Отправлен ответ пользователю {vk_peer_id}")
 
-                # 2. Закрываем цикл в БД, чтобы скрипт не нашел это сообщение снова
+                # Закрываем цикл в БД
                 insert_query = """
                     INSERT INTO messages (user_id, character_id, role, content)
                     VALUES (?, ?, 'assistant', ?);
@@ -88,7 +84,6 @@ async def recover():
             except Exception as e:
                 logger.error(f"❌ Ошибка при восстановлении для {vk_peer_id}: {e}")
 
-    await db.disconnect()
     logger.info("🏁 Процесс восстановления завершен.")
 
 
