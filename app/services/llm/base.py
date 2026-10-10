@@ -1,3 +1,4 @@
+# app/services/llm/base.py
 from __future__ import annotations
 
 import logging
@@ -37,7 +38,8 @@ class LLMBase(ABC):
             self,
             messages: list[dict[str, str]],
             max_retries: int = 2,
-            model_override: str | None = None
+            model_override: str | None = None,
+            allow_short_response: bool = False,
     ) -> LLMResult:
         """
         Генерирует ответ на основе списка сообщений.
@@ -47,6 +49,7 @@ class LLMBase(ABC):
                      [{"role": "system", "content": "..."}, ...]
             max_retries: Максимальное количество попыток при ошибках
             model_override: Модель для генерации
+            allow_short_response: Разрешить короткие ответы (критично для выжимки визуального состояния)
 
         Returns:
             LLMResult с результатом генерации
@@ -91,4 +94,8 @@ class LLMBase(ABC):
             prompt: str,
             model_override: str | None = None
     ) -> LLMResult:
-        pass
+        """
+        Анализирует изображение.
+        По умолчанию возвращает заглушку, если провайдер не поддерживает Vision.
+        """
+        return LLMResult(success=False, error_code=501, error_message="Vision not supported by this provider")

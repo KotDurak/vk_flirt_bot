@@ -7,6 +7,9 @@ import re
 import random
 import copy
 import os
+import base64
+from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 from difflib import SequenceMatcher
 
@@ -14,12 +17,9 @@ from app.services.chat_queue import ChatTask
 from app.services.llm import create_llm_client
 from app.services.memory import maybe_generate_summary, build_llm_context
 from app.db.repositories.payments import PaymentRepository
+from app.db.repositories.generations import GenerationRepository
 from app.vk.api import VKApi
 from app.config import get_settings, get_llm_settings
-import base64
-from pathlib import Path
-from app.db.repositories.generations import GenerationRepository
-
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,7 @@ def _truncate(value: str, limit: int = 1500) -> str:
     return value[: limit - 1] + "…"
 
 
-def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[
-    bool, list[str]]:
+def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[bool, list[str]]:
     """Детектор зацикливания: ловит копипаст и повторяющиеся действия."""
     if len(recent_assistant_msgs) < 2:
         return False, []
@@ -231,7 +230,7 @@ async def _handle_photo_message(
 
         logger.info("🏁 FINISHED photo task for user=%s", task.user_id)
     else:
-        logger.error(f"❌ Vision API failed: {vision_result.error_message}")
+        logger.error(f" Vision API failed: {vision_result.error_message}")
         answer = f"*{char_name} прищуривается, пытаясь разглядеть детали.* Кажется, картинка не загрузилась, попробуй отправить ещё раз?"
         await api.send_message(peer_id=task.peer_id, text=answer)
 
@@ -248,7 +247,7 @@ async def process_chat_task(
         payment_repo: PaymentRepository,
         gen_repo: GenerationRepository,
 ) -> None:
-    logger.info(" START task: user=%s char=%s text='%s'",
+    logger.info("🚀 START task: user=%s char=%s text='%s'",
                 task.user_id, task.char_id, task.text[:50])
 
     is_start_message = task.text.startswith("[Начало диалога") or task.text.startswith("[СИСТЕМНАЯ КОМАНДА")
@@ -257,10 +256,10 @@ async def process_chat_task(
     if not is_start_message and not is_regeneration:
         balance = await payment_repo.get_user_balance(task.user_id)
         if balance <= 0:
-            logger.warning("⚠️ User %s has no messages left", task.user_id)
+            logger.warning("️ User %s has no messages left", task.user_id)
             await api.send_message(
                 peer_id=task.peer_id,
-                text="😿 У тебя закончились сообщения! Купи новый пакет в главном меню."
+                text=" У тебя закончились сообщения! Купи новый пакет в главном меню."
             )
             return
 
@@ -274,7 +273,15 @@ async def process_chat_task(
     # 🔥 НОВАЯ ВЕТКА: ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ (через единую очередь)
     # ========================================================================
     if getattr(task, 'is_image_generation', False):
-        await _handle_image_generation(task, api, session, msg_repo, payment_repo, gen_repo)
+        await _handle_image_generation(
+            task=task,
+            api=api,
+            session=session,
+            msg_repo=msg_repo,
+            payment_repo=payment_repo,
+            gen_repo=gen_repo,
+            llm=llm,
+        )
         return
 
     # ========================================================================
@@ -380,7 +387,7 @@ async def process_chat_task(
                     logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying...")
                     continue
                 else:
-                    logger.warning(" FATAL LOOP: Model stuck. Using safe fallback.")
+                    logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
                     char_name = task.char_dict.get("name", "Персонаж")
                     answer = f"*{char_name} мягко переводит тему, заглядывая тебе в глаза с новой эмоцией.*"
                     is_real_answer = True
@@ -407,7 +414,7 @@ async def process_chat_task(
 
         if not is_real_answer or is_debug_force_polza:
             if is_debug_force_polza:
-                logger.info(" [DEBUG] Принудительный вызов Polza AI по команде админа")
+                logger.info("🔧 [DEBUG] Принудительный вызов Polza AI по команде админа")
             else:
                 logger.info("🚨 Основной провайдер упал. Пытаемся перехватить ERROR_MESSAGES через Polza...")
 
@@ -429,7 +436,7 @@ async def process_chat_task(
         if not answer or not answer.strip():
             char_name = task.char_dict.get("name", "Персонаж")
             answer = f"*{char_name} на мгновение замерла, словно обдумывая твои слова, и мягко перевела тему, заглянув тебе в глаза.*"
-            logger.warning("⚠️ SAFETY NET: Пустой ответ заменен на безопасную ролевую паузу.")
+            logger.warning("️ SAFETY NET: Пустой ответ заменен на безопасную ролевую паузу.")
 
         max_send_attempts = 2
         for send_attempt in range(max_send_attempts):
@@ -446,7 +453,7 @@ async def process_chat_task(
                 logger.error(f"🚨 VK Send attempt {send_attempt + 1} failed for user {task.user_id}: {vk_err}")
                 if send_attempt == max_send_attempts - 1:
                     logger.critical(
-                        f" FAILED TO SEND MESSAGE TO USER {task.user_id} AFTER {max_send_attempts} ATTEMPTS")
+                        f"❌ FAILED TO SEND MESSAGE TO USER {task.user_id} AFTER {max_send_attempts} ATTEMPTS")
                 else:
                     await asyncio.sleep(2)
 
@@ -515,7 +522,7 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
     if total_len >= 20 and alpha_count > 25 and cyrillic_count == 0:
         return True, "Отсутствие кириллицы (DrunkSeek detected)"
 
-    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħİĬĮĸłÃÂ\u0120\u010a]', text_stripped))
+    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħİĮĸłÃÂ\u0120\u010a]', text_stripped))
     if mojibake_chars > 5:
         return True, "Обнаружена кодировочная каша (mojibake)"
 
@@ -523,7 +530,7 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
 
 
 # ==============================================================================
-# 🎨 МАГИЯ РИСОВАНИЯ: ИСПРАВЛЕННАЯ ВЫЖИМКА + СООБЩЕНИЕ ДЛЯ ВСЕХ
+# 🎨 МАГИЯ РИСОВАНИЯ: ИСПРАВЛЕННАЯ ВЕРСИЯ (БЕЗ ЛОКАЛЬНЫХ ИМПОРТОВ)
 # ==============================================================================
 async def _handle_image_generation(
         task: ChatTask,
@@ -532,12 +539,9 @@ async def _handle_image_generation(
         msg_repo: Any,
         payment_repo: PaymentRepository,
         gen_repo: GenerationRepository,
+        llm: Any,
 ) -> None:
     """Генерация картинки с жесткой выжимкой, защитой от спама и уведомлением."""
-    import base64
-    from pathlib import Path
-    from datetime import datetime, timezone
-
     logger.info("🎨 START image generation: user=%s", task.user_id)
 
     cost = 15
@@ -545,9 +549,9 @@ async def _handle_image_generation(
     char_slug = task.char_dict.get("slug", "")
     vk_user_id = task.user_dict.get('vk_user_id', 0)
     is_admin = get_settings().is_admin(vk_user_id)
-    telegram_bot_link = "@MyNekoBaka89_bot"  # <-- ЗАМЕНИТЕ НА СВОЙ
+    telegram_bot_link = "@MyNekoBaka89_bot"
 
-    # 1. 🔥 ПРОВЕРКА КУЛДАУНА (только для не-админов)
+    # 1. ПРОВЕРКА КУЛДАУНА (только для не-админов)
     if not is_admin:
         last_attempt = await gen_repo.get_last_attempt(task.user_id)
         if last_attempt:
@@ -557,12 +561,12 @@ async def _handle_image_generation(
             now = datetime.now(timezone.utc)
             time_diff = (now - last_attempt).total_seconds()
 
-            if time_diff < 300:  # 5 минут = 300 секунд
+            if time_diff < 300:
                 remaining_seconds = int(300 - time_diff)
                 minutes = remaining_seconds // 60
                 seconds = remaining_seconds % 60
 
-                logger.info(f"⏳ User {task.user_id} hit generation cooldown. Remaining: {remaining_seconds}s")
+                logger.info(f" User {task.user_id} hit generation cooldown. Remaining: {remaining_seconds}s")
                 await api.send_message(
                     peer_id=task.peer_id,
                     text=(
@@ -573,22 +577,20 @@ async def _handle_image_generation(
                 )
                 return
 
-        # 2. 🔥 ПРОВЕРКА БАЛАНСА (только для не-админов)
+        # 2. ПРОВЕРКА БАЛАНСА
         balance = await payment_repo.get_user_balance(task.user_id)
         if balance < cost:
             await api.send_message(
                 peer_id=task.peer_id,
-                text=f"😿 У тебя не хватает энергии для магии рисования! Нужно {cost} ⚡, а у тебя {balance}."
+                text=f"😿 У тебя не хватает энергии для магии рисования! Нужно {cost} , а у тебя {balance}."
             )
             return
 
-        # 3. 🔥 МГНОВЕННАЯ БЛОКИРОВКА (ANTI-RACE CONDITION!)
+        # 3. МГНОВЕННАЯ БЛОКИРОВКА (ANTI-RACE CONDITION)
         await gen_repo.log_attempt(task.user_id, "pending", "Generation started")
         logger.info(f"🔒 User {task.user_id} generation locked in DB (pending)")
 
-    # ========================================================================
-    # 🔥 СООБЩЕНИЕ О НАЧАЛЕ ГЕНЕРАЦИИ (ТЕПЕРЬ ОТПРАВЛЯЕТСЯ ВСЕГДА, ДАЖЕ АДМИНУ!)
-    # ========================================================================
+    # СООБЩЕНИЕ О НАЧАЛЕ ГЕНЕРАЦИИ (всегда, даже админу)
     await api.send_message(
         peer_id=task.peer_id,
         text="⏳ Художник уже взял в руки кисть! Генерирую изображение, подождите немного..."
@@ -615,7 +617,7 @@ async def _handle_image_generation(
     if not char_image_path:
         logger.warning(f"⚠️ No local image found for slug '{char_slug}'")
 
-    # 5. БЕРЕМ 10 ПОСЛЕДНИХ СООБЩЕНИЙ (оптимально для выжимки)
+    # 5. БЕРЕМ 10 ПОСЛЕДНИХ СООБЩЕНИЙ для выжимки
     recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=10)
     history_text = ""
     scene_description_for_image = ""
@@ -627,18 +629,12 @@ async def _handle_image_generation(
             content = msg.get("content", "").replace('*', '').replace('—', '').strip()[:150]
             lines.append(f"{role}: {content}")
         history_text = "\n".join(lines)
-
-        # Страховка: краткое описание сцены на английском для генератора картинок
         scene_description_for_image = "Character is in the location and wearing the clothes described in the recent dialogue."
 
-    # 6. ВЫЖИМКА ВИЗУАЛЬНОГО СОСТОЯНИЯ (БЕЗ ЛЕНИВЫХ ЛАЗЕЕК)
+    # 6. ВЫЖИМКА ВИЗУАЛЬНОГО СОСТОЯНИЯ (allow_short_response=True — короткий ответ это норма)
     visual_state = ""
     if history_text:
         try:
-            from app.services.llm.routerai import LLMRouterAI
-            llm_client = LLMRouterAI(session)
-
-            # ИСПРАВЛЕННЫЙ ПРОМПТ: Никаких "output EXACTLY default". Только жесткое требование искать детали.
             extract_prompt = (
                 f"Analyze the dialogue below. What is the character {char_name} CURRENTLY wearing, and what is their pose/location? "
                 f"Look for keywords like: wear, put on, skirt, dress, top, stockings, sit, stand, bed, room. "
@@ -649,18 +645,24 @@ async def _handle_image_generation(
                 f"VISUAL TAGS:"
             )
 
-            text_result = await llm_client.generate([{"role": "user", "content": extract_prompt}])
-            if text_result.success and text_result.content and len(text_result.content.strip()) > 10:
+            # 🔥 КЛЮЧЕВОЙ ФИКС: allow_short_response=True
+            # Короткий ответ типа "silk dress, sitting at table" — это ИДЕАЛЬНЫЙ результат выжимки.
+            text_result = await llm.generate(
+                [{"role": "user", "content": extract_prompt}],
+                allow_short_response=True,
+            )
+
+            if text_result.success and text_result.content:
                 visual_state = text_result.content.strip()
                 logger.info(f"✅ Extracted visual state: {visual_state}")
             else:
-                logger.warning(f"⚠️ Visual extraction weak/empty. Fallback to scene description.")
+                logger.warning(f"⚠️ Visual extraction failed. Using fallback.")
                 visual_state = scene_description_for_image
         except Exception as e:
             logger.warning(f"⚠️ Visual extraction error: {e}")
             visual_state = scene_description_for_image
 
-    # 7. Формируем промпт для рисовалки (С ДВОЙНОЙ ЗАЩИТОЙ)
+    # 7. Формируем промпт для рисовалки
     prompt = (
         f"CHARACTER REFERENCE: Use the provided reference image for facial features, hair color/style, eye color, and body type ONLY. "
         f"CRITICAL: DO NOT copy the reference image's clothing or pose unless the VISUAL STATE explicitly says so. "
@@ -681,12 +683,9 @@ async def _handle_image_generation(
         reference_b64 = f"data:{mime};base64,{b64}"
         logger.info(f"📸 Encoded reference image: {len(image_data)} bytes")
 
-    # 9. Генерируем картинку
-    from app.services.llm.routerai import LLMRouterAI
-    llm_client = LLMRouterAI(session)
+    # 9. Генерируем картинку (ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ llm)
     settings = get_llm_settings()
-
-    image_result = await llm_client.generate_image(
+    image_result = await llm.generate_image(
         prompt=prompt,
         image_url=reference_b64,
         model_override=getattr(settings, 'image_model', None)
@@ -709,7 +708,6 @@ async def _handle_image_generation(
                 temp_file_path = old_path.with_suffix(".jpg")
                 old_path.rename(temp_file_path)
 
-            # Пересохраняем через Pillow для совместимости с ВК
             try:
                 from PIL import Image
                 with Image.open(temp_file_path) as img:
@@ -721,11 +719,9 @@ async def _handle_image_generation(
 
             attachment_to_send = None
             try:
-                # ПОПЫТКА 1: Загрузить как фото
                 attachment_to_send = await api.upload_generated_photo(temp_file_path)
                 logger.info("✅ Uploaded as photo")
             except Exception as photo_err:
-                # ПОПЫТКА 2: Fallback на документ
                 logger.warning(f"⚠️ Photo upload failed: {photo_err}. Falling back to document...")
                 attachment_to_send = await api.upload_as_document(
                     temp_file_path,
@@ -762,22 +758,18 @@ async def _handle_image_generation(
             error_reason = str(vk_err)
 
         finally:
-            # Очистка временного файла в любом случае
             if temp_file_path and temp_file_path.exists():
                 try:
                     temp_file_path.unlink()
                 except Exception:
                     pass
 
-        # 🔥 ОБНОВЛЯЕМ СТАТУС В БД (pending -> success/error)
         await gen_repo.update_last_attempt_status(task.user_id, generation_status, error_reason)
 
     else:
-        # 🔥 ОБНОВЛЯЕМ СТАТУС В БД (pending -> error), если модель ничего не вернула
         await gen_repo.update_last_attempt_status(task.user_id, "error", "Model returned no image")
-
         await api.send_message(
             peer_id=task.peer_id,
             text=f"😿 Фильтры ВК или нейросети заблокировали запрос! 🛡️\n\nДля полной свободы переходи в Telegram: {telegram_bot_link}"
         )
-        logger.info("⚠️ Blocked by moderation or API error.")
+        logger.info("️ Blocked by moderation or API error.")

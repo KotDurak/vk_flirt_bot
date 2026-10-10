@@ -32,17 +32,18 @@ class LLMRouterAI(LLMBase):
             self,
             messages: list[dict[str, str]],
             max_retries: int = 2,
-            model_override: str | None = None
+            model_override: str | None = None,
+            allow_short_response: bool = False,
     ) -> LLMResult:
         primary_model = model_override or getattr(self._settings, 'model', 'qwen/qwen-2.5-72b-instruct')
         fallback_model = getattr(self._settings, 'fallback_model', 'nousresearch/hermes-3-llama-3.1-70b')
 
-        result = await self._try_generate(messages, primary_model, max_retries)
+        result = await self._try_generate(messages, primary_model, max_retries, allow_short_response=allow_short_response)
 
         # Если основная модель упала, пробуем fallback (это стандартная логика)
         if not result.success and (result.error_code >= 400 or result.error_code in [0, 200]):
             logger.warning(f"⚠️ Primary model {primary_model} failed (code {result.error_code}). Switching to fallback: {fallback_model}")
-            result = await self._try_generate(messages, fallback_model, max_retries, is_fallback=True)
+            result = await self._try_generate(messages, fallback_model, max_retries, is_fallback=True, allow_short_response=allow_short_response)
 
         return result
 
@@ -51,7 +52,8 @@ class LLMRouterAI(LLMBase):
             messages: list[dict[str, str]],
             target_model: str,
             max_retries: int,
-            is_fallback: bool = False
+            is_fallback: bool = False,
+            allow_short_response: bool = False,
     ) -> LLMResult:
         prefix = "🔄 FALLBACK" if is_fallback else "🚀"
         logger.info(f"{prefix} RouterAI request: model=%s, msgs=%d", target_model, len(messages))
@@ -99,15 +101,17 @@ class LLMRouterAI(LLMBase):
                             logger.warning(f"⚠️ Empty choices! Full response: {body[:1000]}")
                             return LLMResult(success=False, error_code=200, error_message="Empty choices")
 
-                        # 🔥 КРИТИЧЕСКИЙ ФИКС: Защита от NoneType, которая чинит твой прод
+                        #  КРИТИЧЕСКИЙ ФИКС: Защита от NoneType, которая чинит твой прод
                         raw_content = choices[0].get("message", {}).get("content")
                         content = raw_content if raw_content is not None else ""
                         finish_reason = choices[0].get("finish_reason")
 
                         # Если ответ пустой или слишком короткий, форсируем ошибку,
-                        # чтобы chat_worker.py мог перехватить это и вызвать Polza
-                        if len(content.strip()) < 40:
+                        # чтобы chat_worker.py мог перехватить это и вызвать Polza.
+                        # НО: для задач выжимки (allow_short_response=True) короткий ответ — это норма.
+                        if not allow_short_response and len(content.strip()) < 40:
                             logger.warning(f"🚨 Ответ слишком короткий или пустой ({len(content.strip())} симв.). Форсируем fallback!")
+                            logger.warning(f'[тупорылый ответ!!!]: {content.strip()}')
                             return LLMResult(success=False, error_code=200, error_message="short_response")
 
                         result = LLMResult(success=True, content=content.strip())
@@ -176,7 +180,8 @@ class LLMRouterAI(LLMBase):
             messages=vision_messages,
             target_model=target_model,
             max_retries=2,
-            is_fallback=False
+            is_fallback=False,
+            allow_short_response=True,  # Vision-ответы тоже могут быть короткими
         )
 
     async def generate_image(
