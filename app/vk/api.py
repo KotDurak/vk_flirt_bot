@@ -6,6 +6,7 @@ import random
 from typing import Any
 from pathlib import Path
 import json
+import io
 
 import aiohttp
 
@@ -324,11 +325,18 @@ class VKApi:
     async def upload_as_document(self, file_path: str | Path, filename: str = "generated.jpg",
                                  peer_id: int = None) -> str:
         """
-        Запасной метод загрузки. Работает через сервер документов.
+        ИСПРАВЛЕННЫЙ и стабилизированный запасной метод загрузки через сервер документов.
         """
+        import io
         path = Path(file_path)
+        if not path.exists():
+            raise Exception(f"Fallback failed: temporary file already deleted at {path}")
+
         data = path.read_bytes()
         logger.info("📄 Fallback upload as document: %s (%d bytes)", path.name, len(data))
+
+        if len(data) == 0:
+            raise Exception("Fallback failed: file is empty (0 bytes)")
 
         # 1. Получаем сервер для загрузки документов
         params = {"type": "doc"}
@@ -339,11 +347,14 @@ class VKApi:
         upload_url = server_info["upload_url"]
 
         # 2. Загружаем файл
+        # 🔥 КРИТИЧЕСКИЙ ФИКС: quote_fields=False обязателен, иначе VK иногда возвращает no_file_no_tmp_dir
         form = aiohttp.FormData(quote_fields=False)
+
+        # Используем простые байты, это надежнее чем BytesIO для VK
         form.add_field(
             "file",
             data,
-            filename="upload.jpg",  # Простое ASCII-имя для сервера загрузки
+            filename="upload.jpg",  # Простое ASCII имя для сервера
             content_type="image/jpeg"
         )
 
@@ -352,34 +363,39 @@ class VKApi:
             logger.info(f"📄 Upload server response: status={resp.status}, body={raw_text[:300]}")
 
             if resp.status != 200:
-                raise VKAPIError("docs.upload", resp.status, f"Doc upload failed: {raw_text[:200]}")
+                raise Exception(f"Doc upload failed: {raw_text[:200]}")
 
             try:
                 upload_result = json.loads(raw_text)
             except json.JSONDecodeError:
-                raise VKAPIError("docs.upload", resp.status, f"Non-JSON response: {raw_text[:200]}")
+                raise Exception(f"Non-JSON response: {raw_text[:200]}")
 
             if "error" in upload_result:
-                raise VKAPIError("docs.upload", -1, f"Doc upload failed: {upload_result}")
+                raise Exception(f"Doc upload failed: {upload_result}")
 
             if "file" not in upload_result:
-                raise VKAPIError("docs.upload", -1, f"Doc upload failed, missing 'file' key: {upload_result}")
+                raise Exception(f"Doc upload failed, missing 'file' key: {upload_result}")
 
         # 3. Сохраняем документ
         save_params = {
             "file": upload_result["file"],
-            "title": filename  # Красивое имя с эмодзи для пользователя
+            "title": filename  # Здесь уже можно использовать красивое имя с эмодзи
         }
         if peer_id:
             save_params["peer_id"] = peer_id
 
         saved = await self.call("docs.save", **save_params)
 
-        doc_data = saved.get("doc", {})
+        # 🔥 ВАША ОТЛИЧНАЯ ПРОВЕРКА на формат ответа (list или dict)
+        if isinstance(saved, list):
+            doc_data = saved[0] if saved else {}
+        else:
+            doc_data = saved.get("doc", saved)
+
         owner_id = doc_data.get("owner_id")
         doc_id = doc_data.get("id")
 
         if not owner_id or not doc_id:
-            raise VKAPIError("docs.save", -1, f"Invalid save response: {saved}")
+            raise Exception(f"Invalid save response: {saved}")
 
         return f"doc{owner_id}_{doc_id}"
