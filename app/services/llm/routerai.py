@@ -178,3 +178,95 @@ class LLMRouterAI(LLMBase):
             max_retries=2,
             is_fallback=False
         )
+
+    async def generate_image(
+            self,
+            prompt: str,
+            image_url: str | None = None,
+            model_override: str | None = None
+    ) -> dict | None:
+        """
+        Генерирует изображение через RouterAI /images endpoint.
+        Поддерживает input_references для img2img.
+        """
+        import base64
+        import tempfile
+        import os
+
+        target_model = model_override or getattr(self._settings, 'image_model', 'bytedance-seed/seedream-5-0-flash')
+        logger.info(f" Image generation request: model={target_model}, reference={image_url is not None}")
+
+        # 🔥 ПРАВИЛЬНЫЙ ЭНДПОИНТ: /images (не /images/generations!)
+        url = f"{self.base_url.rstrip('/')}/images"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Формируем payload
+        payload = {
+            "model": target_model,
+            "prompt": prompt,
+        }
+
+        # 🔥 ПРАВИЛЬНАЯ СТРУКТУРА: input_references
+        if image_url:
+            payload["input_references"] = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url}
+                }
+            ]
+
+        try:
+            async with self._session.post(
+                    url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=120)
+            ) as response:
+                body_text = await response.text()
+
+                if response.status == 200:
+                    try:
+                        data = json.loads(body_text)
+                    except json.JSONDecodeError:
+                        logger.error(f"❌ Invalid JSON response: {body_text[:500]}")
+                        return None
+
+                    logger.info(f"🔍 Raw API Response keys: {list(data.keys())}")
+
+                    if "error" in data:
+                        logger.error(f"❌ API returned error inside 200 OK: {data['error']}")
+                        return None
+
+                    image_data = data.get("data")
+                    if not image_data or not isinstance(image_data, list) or len(image_data) == 0:
+                        logger.error(f"❌ 'data' array is empty. Full response: {body_text[:1000]}")
+                        return None
+
+                    item = image_data[0]
+                    logger.info(f"🔍 Item keys: {list(item.keys())}")
+
+                    if "url" in item:
+                        logger.info("✅ Image generated (URL format)")
+                        return {"type": "url", "value": item["url"]}
+
+                    elif "b64_json" in item:
+                        logger.info("✅ Image generated (Base64 format), saving to temp file...")
+                        b64_data = item["b64_json"]
+                        media_type = item.get("media_type", "image/jpeg")
+                        ext = media_type.split("/")[-1]
+
+                        fd, temp_path = tempfile.mkstemp(suffix=f".{ext}")
+                        with os.fdopen(fd, 'wb') as f:
+                            f.write(base64.b64decode(b64_data))
+
+                        return {"type": "file", "value": temp_path}
+                    else:
+                        logger.error(f"❌ Unknown image format. Item: {item}. Full response: {body_text[:1000]}")
+                        return None
+                else:
+                    logger.error(f"❌ Image generation failed {response.status}: {body_text[:500]}")
+                    return None
+        except Exception as e:
+            logger.error(f"💥 Image generation network error: {e}")
+            return None

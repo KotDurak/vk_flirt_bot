@@ -1,11 +1,14 @@
-#app/handlers/messages.py
-#ВАЖНО! В этом файле запрещено писать функции, логику!!! Кто напишет того Барсик покусает
+# app/handlers/messages.py
+# ВАЖНО! В этом файле запрещено писать функции, логику!!! Кто напишет того Барсик покусает
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any
 import aiohttp
+import time
+from datetime import datetime, timedelta
+
 from app.db.repositories.promo import PromoRepository
 from app.services.event_cache import EventCache
 from app.vk.api import VKApi
@@ -30,7 +33,7 @@ from app.vk.keyboards import (
     get_regenerate_inline_keyboard,
     get_admin_promo_list_keyboard,
     get_dialog_keyboard,
-    get_admin_ticket_list_keyboard,       # <--- ДОБАВИТЬ
+    get_admin_ticket_list_keyboard,
     get_admin_ticket_actions_keyboard,
     get_referral_keyboard,
 )
@@ -41,10 +44,11 @@ from app.utils import (
     shorten_url,
     generate_and_upload_qr,
 )
-import time
+
 logger = logging.getLogger(__name__)
 
 awaiting_support = {}
+
 
 async def handle_update(
         update: dict[str, Any],
@@ -86,10 +90,8 @@ async def handle_update(
     if message.get("attachments"):
         for att in message["attachments"]:
             if att["type"] == "photo":
-                # Берем самое большое доступное разрешение
                 photo_url = att["photo"]["sizes"][-1]["url"]
                 break
-
 
     from_id = message.get("from_id") or message.get("user_id")
     peer_id = message.get("peer_id") or from_id
@@ -134,21 +136,18 @@ async def handle_update(
         send_keyboard = get_main_menu_keyboard()
 
     elif cmd == "referral":
-        # Генерируем код на лету: vk + ID пользователя в ВК
         referral_code = f"vk{user['vk_user_id']}"
-
         answer = (
             f"🎁 Твой личный промокод: `{referral_code}`\n\n"
             "Поделись кодом! Когда друг введет его и напишет мне, он получит 10 энергии, а ты — 5 в качестве благодарности за рекомендацию."
         )
         send_keyboard = get_referral_keyboard(referral_code)
 
-    # === СПИСОК ПЕРСОНАЖЕЙ (С НАСТОЯЩЕЙ БД-ПАГИНАЦИЕЙ) ===
+    # === СПИСОК ПЕРСОНАЖЕЙ ===
     elif cmd == "chars" or text_lower in ("персонажи", "выбрать персонажа", "персонаж"):
         page = int(payload.get("page", 1))
-        chars_per_page = 6  # 2 в ряд * 3 ряда = 6 кнопок (идеально для inline)
+        chars_per_page = 6
 
-        # 1. Узнаем общее количество, чтобы рассчитать страницы
         total_chars = await char_repo.get_active_characters_count()
 
         if total_chars == 0:
@@ -157,27 +156,21 @@ async def handle_update(
         else:
             total_pages = (total_chars + chars_per_page - 1) // chars_per_page
 
-            # Защита от некорректных номеров страниц (например, если кто-то подделал payload)
             if page < 1:
                 page = 1
             elif page > total_pages:
                 page = total_pages
 
-            # 2. Загружаем ТОЛЬКО нужных персонажей из БД (быстро и экономно)
             offset = (page - 1) * chars_per_page
             page_chars = await char_repo.get_active_characters_paginated(chars_per_page, offset)
 
-            # 3. Формируем красивое текстовое описание
             answer = f"👥 Доступные персонажи (Страница {page} из {total_pages}):\n\n"
             for i, char in enumerate(page_chars, start=offset + 1):
                 desc = char.get("description", "Описание отсутствует")
-                # Обрезаем описание, чтобы сообщение не было гигантским, но давало понять суть
                 short_desc = desc[:120] + "…" if len(desc) > 120 else desc
                 answer += f"{i}. **{char['name']}**\n{short_desc}\n\n"
 
             answer += "Нажми на имя персонажа ниже, чтобы выбрать его 👇"
-
-            # 4. Генерируем клавиатуру (функцию get_characters_paginated_keyboard мы добавили в прошлом шаге)
             send_keyboard = get_characters_paginated_keyboard(page_chars, page, total_pages)
 
     # === ВЫБОР КОНКРЕТНОГО ПЕРСОНАЖА ===
@@ -189,19 +182,14 @@ async def handle_update(
             answer = "Персонаж не найден 😿"
             send_keyboard = get_main_menu_keyboard()
         else:
-            # 1. Сначала узнаем, был ли у пользователя ДРУГОЙ персонаж до этого
             old_char = await char_repo.get_user_character(user["id"])
 
-            # 2. Если был, и он НЕ совпадает с новым, стираем его историю и саммари
             if old_char and old_char["id"] != character["id"]:
                 await msg_repo.clear_history(user["id"], old_char["id"])
                 await summary_repo.clear_summary(user["id"], old_char["id"])
                 logger.info("🧹 Cleared history for old character %s", old_char["id"])
 
-            # 3. Устанавливаем нового персонажа
             await char_repo.set_user_character(user["id"], character["id"])
-
-            # 4. На всякий случай чистим историю нового персонажа (она и так должна быть пустой)
             await msg_repo.clear_history(user["id"], character["id"])
             await summary_repo.clear_summary(user["id"], character["id"])
 
@@ -260,9 +248,9 @@ async def handle_update(
             await summary_repo.clear_summary(user["id"])
             answer = "🔄 Вся история сброшена! Начнем всё с чистого листа? 😉"
         send_keyboard = get_main_menu_keyboard()
-    # === ПОДДЕРЖКА (Только по явной команде /support или клику по кнопке) ===
+
+    # === ПОДДЕРЖКА ===
     elif text_lower.startswith("/support") or cmd == "support":
-        # 1. Фильтруем текст кнопки. Если это просто название кнопки или команды — считаем текст пустым.
         if text_lower in ("поддержка", "support", "🆘 поддержка", "🆘 support", "/support", "🆘"):
             support_text = ""
         else:
@@ -271,11 +259,8 @@ async def handle_update(
 
         attachments = message.get("attachments", [])
 
-        # 2. Если нет ни нормального текста, ни скриншота — показываем инструкцию и ЗАПОМИНАЕМ юзера
         if not support_text and not attachments:
-            # ЗАПОМИНАЕМ: юзер нажал кнопку и мы ждем от него следующее сообщение (5 минут)
             awaiting_support[int(from_id)] = time.time()
-
             answer = (
                 "🆘 Служба поддержки\n\n"
                 "Пожалуйста, опиши суть проблемы и прикрепи скриншот (если есть).\n\n"
@@ -285,9 +270,7 @@ async def handle_update(
             )
             send_keyboard = get_main_menu_keyboard()
         else:
-            # 3. Вызываем сервис. Барсик доволен, логика не в хендлере!
             from app.services.support import process_support_request
-
             answer = await process_support_request(
                 api=api,
                 user_id=user["id"],
@@ -327,10 +310,7 @@ async def handle_update(
                 messages=energy,
             )
 
-            # 1. Сокращаем ссылку
             short_url = await shorten_url(result.payment_url)
-
-            # 2. 🎯 Генерируем и загружаем QR-код через твой VKApi.upload_photo!
             qr_attachment = await generate_and_upload_qr(api, short_url)
 
             answer = (
@@ -343,8 +323,6 @@ async def handle_update(
             )
 
             send_keyboard = get_payment_action_keyboard(short_url, result.invoice_id)
-
-            # Если загрузка по какой-то причине не удалась, VK хотя бы покажет ссылку текстом
             final_attachment = qr_attachment if qr_attachment else short_url
 
             await api.send_message(
@@ -353,8 +331,7 @@ async def handle_update(
                 keyboard=send_keyboard,
                 attachment=final_attachment
             )
-            return  # Важно: прерываем выполнение, чтобы не сработал финальный send_message внизу
-
+            return
         else:
             answer = f"❌ Ошибка создания платежа: {result.error_message}"
             send_keyboard = get_payment_keyboard()
@@ -362,7 +339,6 @@ async def handle_update(
     # === ПРОВЕРКА СТАТУСА ПЛАТЕЖА ===
     elif cmd == "check_payment":
         invoice_id = payload.get("invoice_id")
-
         payment = await payment_repo.get_payment_by_invoice(invoice_id)
 
         if not payment:
@@ -380,7 +356,6 @@ async def handle_update(
                     user_id=user["id"],
                     messages=payment["messages"]
                 )
-
                 new_balance = await payment_repo.get_user_balance(user["id"])
 
                 answer = (
@@ -404,13 +379,11 @@ async def handle_update(
             answer = "🔒 Эта команда доступна только администратору."
             send_keyboard = get_main_menu_keyboard()
         else:
-            # Импортируем здесь, чтобы избежать циклических зависимостей, если MODELS_LIST в config
             from app.config import MODELS_LIST
             available_models = list(MODELS_LIST.keys())
             parts = text_lower.split(maxsplit=1)
 
             if len(parts) == 1:
-                # Показать текущую и список
                 current_model = user.get("preferred_model") or get_llm_settings().model
                 msg = f"⚙️ Твоя текущая модель: `{current_model}`\n\n📋 Доступные модели:\n"
                 for i, m_key in enumerate(available_models, 1):
@@ -422,12 +395,10 @@ async def handle_update(
                 query = parts[1].strip()
                 new_model = None
 
-                # Если ввели номер
                 if query.isdigit():
                     idx = int(query) - 1
                     if 0 <= idx < len(available_models):
                         new_model = available_models[idx]
-                # Если ввели название
                 elif query in available_models:
                     new_model = query
 
@@ -437,6 +408,7 @@ async def handle_update(
                 else:
                     answer = "❌ Модель не найдена. Используй `/model` для просмотра списка."
                 send_keyboard = get_main_menu_keyboard()
+
     # === АДМИН-ПАНЕЛЬ (ТОЛЬКО ДЛЯ АДМИНА) ===
     elif text_lower.startswith("/admin") or cmd.startswith("admin_"):
         if not get_settings().is_admin(int(from_id)):
@@ -447,22 +419,17 @@ async def handle_update(
             command = cmd if cmd else (parts[0] if parts else "")
             send_keyboard = get_main_menu_keyboard()
 
-            # 1. Проверка пользователя: /admin_check 123456789
             if command in ("/admin_check", "/admin_info") and len(parts) >= 2:
                 vk_id = int(parts[1])
                 target_user = await user_repo.get_by_vk_id(vk_id)
-
                 if not target_user:
                     answer = f"❌ Пользователь с VK ID {vk_id} не найден в БД."
                 else:
-                    # Берем внутренний ID для всех остальных репозиториев
                     user_id = target_user["id"]
-
                     balance = await payment_repo.get_user_balance(user_id)
                     stats = await payment_repo.get_user_stats(user_id)
                     current_char = await char_repo.get_user_character(user_id)
                     char_name = current_char["name"] if current_char else "не выбран"
-
                     answer = (
                         f"🔍 Инфо о пользователе {vk_id}:\n\n"
                         f"⚡ Баланс (messages): {balance}\n"
@@ -471,11 +438,9 @@ async def handle_update(
                         f"🎭 Текущий персонаж: {char_name}"
                     )
 
-            # 2. Начисление энергии конкретному юзеру: /admin_add 123456789 50
             elif command in ("/admin_add", "/admin_add_energy") and len(parts) >= 3:
                 vk_id = int(parts[1])
                 amount = int(parts[2])
-
                 target_user = await user_repo.get_by_vk_id(vk_id)
                 if not target_user:
                     answer = f"❌ Пользователь с VK ID {vk_id} не найден."
@@ -483,23 +448,19 @@ async def handle_update(
                     user_id = target_user["id"]
                     await payment_repo.add_user_messages(user_id, amount)
                     new_balance = await payment_repo.get_user_balance(user_id)
-
                     answer = (
                         f"✅ Начислено {amount} энергии пользователю {vk_id}.\n"
                         f"Новый баланс: {new_balance} ⚡"
                     )
 
-            # 3. Сброс истории пользователя: /admin_reset 123456789
             elif command in ("/admin_reset", "/admin_reset_history") and len(parts) >= 2:
                 vk_id = int(parts[1])
-
                 target_user = await user_repo.get_by_vk_id(vk_id)
                 if not target_user:
                     answer = f"❌ Пользователь с VK ID {vk_id} не найден."
                 else:
                     user_id = target_user["id"]
                     current_char = await char_repo.get_user_character(user_id)
-
                     if current_char:
                         await msg_repo.clear_history(user_id, current_char["id"])
                         await summary_repo.clear_summary(user_id, current_char["id"])
@@ -512,13 +473,9 @@ async def handle_update(
                         await summary_repo.clear_summary(user_id)
                         answer = f"🔄 Глобальная история пользователя {vk_id} сброшена."
 
-            # 4. 🚀 МАССОВОЕ ПОПОЛНЕНИЕ ВСЕМ: /admin_refill_all 50
             elif command == "/admin_refill_all" and len(parts) >= 2:
                 target_amount = int(parts[1])
-
-                # Вызываем метод из UserRepository (он работает напрямую с таблицей users)
                 affected_count = await user_repo.refill_all_messages(target_amount)
-
                 answer = (
                     f"🚀 МАССОВОЕ ПОПОЛНЕНИЕ ВЫПОЛНЕНО!\n\n"
                     f"✅ {affected_count} пользователям установлен баланс {target_amount} ⚡\n"
@@ -526,12 +483,10 @@ async def handle_update(
                     f"Можно публиковать пост в паблике! 🐾"
                 )
 
-            # 5. 🎁 СОЗДАНИЕ ПРОМОКОДА: /admin_promo_add CODE REWARD [MAX_USES]
             elif command == "/admin_promo_add" and len(parts) >= 3:
                 code = parts[1].upper()
                 try:
                     reward = int(parts[2])
-                    # Если третий аргумент есть и это не "0", используем его. Иначе None (безлимит)
                     if len(parts) > 3 and parts[3] != "0":
                         max_uses = int(parts[3])
                     else:
@@ -540,7 +495,6 @@ async def handle_update(
                     answer = "❌ Ошибка: награда и лимит должны быть числами.\nПример: /admin_promo_add KITSUNE 50 100"
                 else:
                     await promo_repo.create_promo_code(code, reward, max_uses)
-
                     limit_text = f"{max_uses} раз" if max_uses is not None else "Безлимитно"
                     answer = (
                         f"✅ Промокод успешно создан!\n\n"
@@ -550,18 +504,13 @@ async def handle_update(
                         f"(Каждый пользователь может использовать его только 1 раз)"
                     )
 
-            # 6. 📋 СПИСОК ПРОМОКОДОВ С ПАГИНАЦИЕЙ
             elif command == "/admin_promo_list" or cmd == "admin_promo_list":
                 page = int(payload.get("page", 1))
                 per_page = 10
-
-                # Защита от некорректных страниц
                 if page < 1:
                     page = 1
 
                 promos, total = await promo_repo.get_all_active_promos(limit=per_page, offset=(page - 1) * per_page)
-
-                # Рассчитываем общее количество страниц
                 total_pages = (total + per_page - 1) // per_page if total > 0 else 1
                 if page > total_pages:
                     page = total_pages
@@ -575,13 +524,11 @@ async def handle_update(
                         limit = f"{p['current_uses']}/{p['max_uses']}" if p[
                                                                               'max_uses'] is not None else f"{p['current_uses']}/∞"
                         answer += f"🔹 `{p['code']}` | Награда: {p['reward']} | Использовано: {limit}\n"
-
                     answer += "\n Чтобы создать новый: `/admin_promo_add КОД НАГРАДА [ЛИМИТ]`"
                     send_keyboard = get_admin_promo_list_keyboard(page, total_pages)
-            # 7. 🎫 ПРОСМОТР ТИКЕТОВ С ПАГИНАЦИЕЙ: /admin_tickets [страница] или кнопка
+
             elif command == "admin_tickets" or text_lower == "/admin_tickets":
                 try:
-                    # Берем страницу из payload (если кнопка) или из текста (если команда)
                     page = int(payload.get("page", 1))
                     if len(parts) > 1 and text_lower.startswith("/admin_tickets"):
                         page = int(parts[1])
@@ -609,12 +556,9 @@ async def handle_update(
                                 f"📎 {'Есть скриншот' if t['attachment_url'] else 'Нет вложений'}\n"
                                 f"🕒 {t['created_at']}\n\n"
                             )
-
                         send_keyboard = get_admin_ticket_list_keyboard(tickets, page, total_pages)
 
-            # 8. 👁️ ПРОСМОТР ПОЛНОГО ТИКЕТА: /admin_ticket_view <id> или кнопка
             elif command == "admin_ticket_view":
-                # Берем ID из payload (кнопка) или из текста (команда)
                 ticket_id = payload.get("id")
                 if not ticket_id and len(parts) >= 2:
                     try:
@@ -639,14 +583,10 @@ async def handle_update(
                         )
                         if ticket["attachment_url"]:
                             answer += f"📸 Скриншот: {ticket['attachment_url']}\n"
-
-                        # Возвращаем страницу из payload, чтобы кнопка "Назад" работала корректно
                         page = int(payload.get("page", 1))
                         send_keyboard = get_admin_ticket_actions_keyboard(ticket_id, page)
 
-            # 9. ✅ ЗАКРЫТИЕ ТИКЕТА: /admin_ticket_resolve <id> или кнопка
             elif command == "admin_ticket_resolve":
-                # Берем ID из payload (кнопка) или из текста (команда)
                 ticket_id = payload.get("id")
                 if not ticket_id and len(parts) >= 2:
                     try:
@@ -662,11 +602,8 @@ async def handle_update(
                         answer = f"✅ Тикет #{ticket_id} успешно закрыт (статус: resolved)."
                     else:
                         answer = f"❌ Не удалось закрыть тикет #{ticket_id}. Возможно, он уже закрыт или не существует."
-
-                    # После закрытия возвращаемся к списку на 1 страницу
                     send_keyboard = get_admin_ticket_actions_keyboard(ticket_id, 1)
 
-            # 10. Справка по админ-командам (ОБНОВЛЕННАЯ)
             else:
                 answer = (
                     "🛠️ Доступные админ-команды:\n\n"
@@ -680,9 +617,11 @@ async def handle_update(
                     "`/admin_ticket_view <id>` — 👁️ полный просмотр тикета + скрин\n"
                     "`/admin_ticket_resolve <id>` — ✅ закрыть тикет"
                 )
+
     # === ПЕРЕГЕНЕРАЦИЯ ОТВЕТА ===
     elif cmd == "regenerate":
         current_char = await char_repo.get_user_character(user["id"])
+        is_admin = get_settings().is_admin(int(from_id))
 
         if not current_char:
             answer = "Сначала выбери персонажа! 👇"
@@ -690,7 +629,9 @@ async def handle_update(
         else:
             balance = await payment_repo.get_user_balance(user["id"])
             target_model = settings.model
-            if balance <= 0:
+
+            # 🔥 ФИКС: Админу не показываем ошибку баланса
+            if balance <= 0 and not is_admin:
                 char_name = current_char["name"]
                 answer = (
                     f"😿 {char_name} устала и ей нужно отдохнуть!\n\n"
@@ -704,37 +645,62 @@ async def handle_update(
                     answer = "Нечего перегенерировать. Напиши что-нибудь первым! 😉"
                     send_keyboard = get_dialog_keyboard()
                 else:
-                    success = await payment_repo.deduct_messages(user["id"], 1)
-                    if not success:
-                        answer = "😿 Не удалось списать энергию. Попробуй позже."
-                        send_keyboard = get_main_menu_keyboard()
-                    else:
-                        # 1. Удаляем неудачный ответ ассистента из БД
-                        await msg_repo.delete_last_assistant_message(user["id"], current_char["id"])
+                    # 🔥 ФИКС: Списание энергии ТОЛЬКО если это не админ
+                    if not is_admin:
+                        success = await payment_repo.deduct_messages(user["id"], 1)
+                        if not success:
+                            answer = "😿 Не удалось списать энергию. Попробуй позже."
+                            send_keyboard = get_main_menu_keyboard()
+                            await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
+                            return
 
-                        # 2. Берем текст последнего сообщения ПОЛЬЗОВАТЕЛЯ
-                        last_user_text = history[-2]["content"]
+                    # 1. Удаляем неудачный ответ ассистента из БД
+                    await msg_repo.delete_last_assistant_message(user["id"], current_char["id"])
 
-                        # 3. Индикатор загрузки (БЕЗ keyboard, чтобы не стирать нижнее меню!)
-                        await api.send_message(
-                            peer_id=int(peer_id),
-                            text="🔄 Перегенерация ответа..."
-                        )
-                        active_model = user.get("preferred_model") or target_model
+                    # 2. Берем текст последнего сообщения ПОЛЬЗОВАТЕЛЯ
+                    last_user_text = history[-2]["content"]
 
-                        # 4. Отправляем задачу в очередь заново с inline-клавиатурой
-                        await chat_queue.add(ChatTask(
-                            user_id=user["id"],
-                            char_id=current_char["id"],
-                            peer_id=int(peer_id),
-                            text=last_user_text,
-                            user_dict=user,
-                            char_dict=current_char,
-                            keyboard=get_regenerate_inline_keyboard(),
-                            is_regeneration=True,
-                            model_name=active_model,
-                        ))
-                        return
+                    # 3. Индикатор загрузки
+                    await api.send_message(
+                        peer_id=int(peer_id),
+                        text="🔄 Перегенерация ответа..."
+                    )
+                    active_model = user.get("preferred_model") or target_model
+
+                    # 4. Отправляем задачу в очередь заново
+                    await chat_queue.add(ChatTask(
+                        user_id=user["id"],
+                        char_id=current_char["id"],
+                        peer_id=int(peer_id),
+                        text=last_user_text,
+                        user_dict=user,
+                        char_dict=current_char,
+                        keyboard=get_regenerate_inline_keyboard(),
+                        is_regeneration=True,
+                        model_name=active_model,
+                    ))
+                    return
+
+    # === МАГИЯ РИСОВАНИЯ ===
+    elif cmd == "generate_image":
+        current_char = await char_repo.get_user_character(user["id"])
+
+        if not current_char:
+            answer = "Сначала выбери персонажа, чью магию ты хочешь увидеть! 👇"
+            send_keyboard = get_main_menu_keyboard()
+        else:
+            await chat_queue.add(ChatTask(
+                user_id=user["id"],
+                char_id=current_char["id"],
+                peer_id=int(peer_id),
+                text="[GENERATE_IMAGE]",
+                user_dict=user,
+                char_dict=current_char,  # сюда уже попадает slug из БД
+                keyboard=get_regenerate_inline_keyboard(),
+                is_image_generation=True
+            ))
+            return
+
     elif cmd == "copy_referral":
         code = payload.get("code", "")
         answer = (
@@ -748,6 +714,7 @@ async def handle_update(
             f"Бонусы начислятся автоматически, как только друг напишет мне первое сообщение. ⚡"
         )
         send_keyboard = get_main_menu_keyboard()
+
     # === ПРОМОКОДЫ И РЕФЕРАЛЫ ===
     elif cmd == "promo" or text_lower.startswith("/promo"):
         promo_code = ""
@@ -759,7 +726,6 @@ async def handle_update(
             answer = "🎁 Введите промокод!\n\nНапишите команду в формате:\n/promo KITSUNE2026"
             send_keyboard = get_main_menu_keyboard()
         else:
-            # 1. Сначала проверяем, не является ли это реферальным кодом (формат vk123456789)
             is_referral = False
             referrer_user = None
 
@@ -770,43 +736,28 @@ async def handle_update(
                     is_referral = True
 
             if is_referral:
-                # Логика реферала с защитой от "старичков"
-
-                # 1. Проверка: не пытался ли юзер пригласить сам себя
                 if user["id"] == referrer_user["id"]:
                     answer = "😿 Ты не можешь пригласить сам себя!"
-
-                # 2. Проверка: был ли юзер уже кем-то приглашен
                 elif user.get("referred_by"):
                     answer = "⚠️ Ты уже был приглашен другим пользователем."
-
-                # 3. НОВАЯ ПРОВЕРКА: Юзер должен быть "свежим" (менее 24 часов в боте)
                 else:
-                    from datetime import datetime, timedelta
-
-                    # Парсим дату регистрации (она приходит в формате 'YYYY-MM-DD HH:MM:SS')
                     created_at_str = user.get("created_at")
                     if created_at_str:
-                        # Убираем возможные microseconds для сравнения
                         created_at_dt = datetime.strptime(created_at_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
                         now_dt = datetime.now()
 
-                        # Если юзер в боте больше 24 часов — отказываем
                         if (now_dt - created_at_dt) > timedelta(hours=24):
                             answer = "⏳ Этот промокод предназначен только для новичков (до 24 часов в боте)."
                         else:
-                            # Все проверки пройдены! Привязываем и даем бонус при первом сообщении
                             await user_repo.set_referred_by(user["id"], referrer_user["id"])
                             answer = (
                                 f"✅ Промокод принят! Ты приглашен пользователем {referrer_vk_id}.\n\n"
                                 f"Напиши мне любое сообщение, чтобы активировать бонус (тебе 10 энергии, другу 5)!"
                             )
                     else:
-                        # На всякий случай, если даты нет
                         await user_repo.set_referred_by(user["id"], referrer_user["id"])
                         answer = "✅ Промокод принят! Напиши что-нибудь, чтобы получить бонус."
             else:
-                # Стандартная логика промокодов из базы
                 promo = await promo_repo.get_active_promo(promo_code.upper())
                 if not promo:
                     answer = f"❌ Промокод {promo_code} не найден или уже недействителен."
@@ -820,38 +771,19 @@ async def handle_update(
                     answer = f"🎉 Промокод {promo_code} активирован!\n\n⚡ Начислено: {reward} энергии\n💬 Текущий баланс: {new_balance} энергии"
 
             send_keyboard = get_main_menu_keyboard()
+
     # === ОБЫЧНЫЙ ДИАЛОГ С ПЕРСОНАЖЕМ ===
     else:
-        # --- НАЧАЛО: ПРОВЕРКА РЕФЕРАЛЬНОГО БОНУСА ---
         if user.get("referred_by") and not user.get("referral_bonus_claimed"):
-            # Проверяем, есть ли уже сообщения у этого юзера (чтобы не начислить за пустой старт)
-            history_check = await msg_repo.get_recent_history(user["id"], 0,
-                                                              limit=1)  # 0 char_id для общей проверки или любого
-
-            # Если это первое реальное сообщение (история пуста или только приветствие)
-            # Для простоты: начисляем, если флаг еще не стоит.
-
             await payment_repo.add_user_messages(user["id"], 10)
             await payment_repo.add_user_messages(user["referred_by"], 5)
             await user_repo.mark_referral_bonus_claimed(user["id"])
-
-            # Уведомляем реферера (опционально, можно убрать если спамит)
-            try:
-                referrer_info = await user_repo.get_by_vk_id(user[
-                                                                 "referred_by"])  # Тут нужен метод получения vk_id по internal id, но пока пропустим для простоты
-                # Можно отправить уведомление, если знаете peer_id реферера
-            except:
-                pass
-
             logger.info(f"Referral bonus awarded to user {user['id']} and referrer {user['referred_by']}")
-        # 0. ПЕРЕХВАТЧИК ПОДДЕРЖКИ (Проверяем, ждем ли мы жалобу от этого юзера)
+
         user_ts = awaiting_support.get(int(from_id))
 
-        # Если юзер в списке ожидания И прошло меньше 300 секунд (5 минут)
         if user_ts and (time.time() - user_ts <= 300):
-            # Сразу удаляем из словаря, чтобы не перехватить его следующие обычные сообщения
             del awaiting_support[int(from_id)]
-
             attachments = message.get("attachments", [])
             if not text and not attachments:
                 answer = "😿 Ты ничего не написал и не прикрепил скриншот. Попробуй еще раз или нажми кнопку '🆘 Поддержка' в главном меню."
@@ -868,7 +800,6 @@ async def handle_update(
                 )
                 send_keyboard = get_main_menu_keyboard()
 
-            # ВАЖНО: отправляем ответ и делаем return, чтобы код ниже НЕ отправил это персонажу!
             await api.send_message(
                 peer_id=int(peer_id),
                 text=answer,
@@ -877,7 +808,6 @@ async def handle_update(
             )
             return
 
-        # 1. СБРОС ФЛАГА, ЕСЛИ ЮЗЕР НАЖАЛ ДРУГУЮ КНОПКУ МЕНЮ (на всякий случай)
         if cmd and cmd != "support":
             awaiting_support.pop(int(from_id), None)
 
@@ -906,8 +836,10 @@ async def handle_update(
                     return
 
                 balance = await payment_repo.get_user_balance(user["id"])
-                balance = await payment_repo.get_user_balance(user["id"])
-                if balance <= 0:
+                is_admin = get_settings().is_admin(int(from_id))
+
+                # 🔥 ФИКС: Админу не блокируем чат при нулевом балансе
+                if balance <= 0 and not is_admin:
                     char_name = current_char["name"]
                     answer = (
                         f"😿 {char_name} устала и ей нужно отдохнуть!\n\n"
@@ -920,7 +852,6 @@ async def handle_update(
                     await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
 
-                # Индикатор загрузки (БЕЗ keyboard)
                 await api.send_message(peer_id=int(peer_id), text="⏳")
                 active_model = user.get("preferred_model") or target_model
 
@@ -951,7 +882,10 @@ async def handle_update(
             else:
                 target_model = settings.model
                 balance = await payment_repo.get_user_balance(user["id"])
-                if balance <= 0:
+
+                # 🔥 ФИКС: Здесь тоже добавим проверку админа на всякий случай, хотя обычно админ пишет через /chat
+                is_admin = get_settings().is_admin(int(from_id))
+                if balance <= 0 and not is_admin:
                     char_name = current_char["name"]
                     answer = (
                         f"😿 {char_name} устала и ей нужно отдохнуть!\n\n"
@@ -980,7 +914,7 @@ async def handle_update(
                 ))
                 return
 
-    # ЕДИНСТВЕННАЯ отправка системного ответа в конце (дубликат удален)
+    # ЕДИНСТВЕННАЯ отправка системного ответа в конце
     await api.send_message(
         peer_id=int(peer_id),
         text=answer,

@@ -247,3 +247,139 @@ class VKApi:
         except Exception as e:
             logger.warning("Failed to set activity for peer %s: %s", peer_id, e)
             return False
+
+    async def upload_generated_photo(self, file_path: str | Path) -> str:
+        path = Path(file_path)
+        if not path.exists():
+            raise VKAPIError("photos.upload", -1, f"File not found: {path}")
+
+        data = path.read_bytes()
+        logger.info("Uploading generated photo %s (%d bytes)", path.name, len(data))
+
+        if len(data) > 5 * 1024 * 1024:
+            raise VKAPIError("photos.upload", -1, f"File too large: {len(data)} bytes (max 5MB)")
+
+        # 1. Получаем адрес сервера загрузки
+        server_info = await self.call("photos.getMessagesUploadServer")
+        upload_url = server_info["upload_url"]
+
+        # 2. Цикл загрузки
+        for attempt in range(3):
+            try:
+                # 🔥 ИСПРАВЛЕНИЕ: Создаем форму НА КАЖДУЮ попытку заново внутри try
+                form = aiohttp.FormData(quote_fields=False)
+                form.add_field(
+                    "photo",
+                    data,
+                    filename="generated_image.jpg",
+                    content_type="image/jpeg"
+                )
+
+                async with self._session.post(upload_url, data=form) as resp:
+                    raw_text = await resp.text()
+                    logger.info("VK upload server response (generated): status=%s", resp.status)
+
+                    if resp.status >= 500:
+                        if attempt < 2:
+                            logger.warning("VK Server error (%s), retrying...", resp.status)
+                            await asyncio.sleep(2 * (attempt + 1))
+                            continue
+                        else:
+                            raise VKAPIError("photos.upload", resp.status, f"VK Server error after 3 attempts")
+
+                    if not raw_text.strip():
+                        raise VKAPIError("photos.upload", resp.status, "Empty response from upload server")
+
+                    try:
+                        upload_result = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        raise VKAPIError("photos.upload", resp.status, f"Non-JSON response: {raw_text[:200]}")
+
+                    # Проверка на пустой photo
+                    if not upload_result.get("photo") or upload_result["photo"] in ("[]", '["\\/"]'):
+                        raise VKAPIError("photos.upload", -1, f"VK returned empty photo field: {upload_result}")
+
+                    # Если дошли сюда — всё успешно, прерываем цикл попыток
+                    break
+
+            except aiohttp.ClientError as exc:
+                if attempt < 2:
+                    logger.warning("Network error, retry %d: %s", attempt + 1, exc)
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                # На последней попытке просто пробрасываем ошибку выше наружу
+                raise VKAPIError("photos.upload", -1, f"Network failed after 3 attempts: {exc}")
+
+        # 3. Сохраняем фото в ВК (код выполнится только после успешного break)
+        saved = await self.call(
+            "photos.saveMessagesPhoto",
+            server=upload_result["server"],
+            photo=upload_result["photo"],
+            hash=upload_result["hash"],
+        )
+
+        photo = saved[0]
+        return f"photo{photo['owner_id']}_{photo['id']}"
+
+    async def upload_as_document(self, file_path: str | Path, filename: str = "generated.jpg",
+                                 peer_id: int = None) -> str:
+        """
+        Запасной метод загрузки. Работает через сервер документов.
+        """
+        path = Path(file_path)
+        data = path.read_bytes()
+        logger.info("📄 Fallback upload as document: %s (%d bytes)", path.name, len(data))
+
+        # 1. Получаем сервер для загрузки документов
+        params = {"type": "doc"}
+        if peer_id:
+            params["peer_id"] = peer_id
+
+        server_info = await self.call("docs.getMessagesUploadServer", **params)
+        upload_url = server_info["upload_url"]
+
+        # 2. Загружаем файл
+        form = aiohttp.FormData(quote_fields=False)
+        form.add_field(
+            "file",
+            data,
+            filename="upload.jpg",  # Простое ASCII-имя для сервера загрузки
+            content_type="image/jpeg"
+        )
+
+        async with self._session.post(upload_url, data=form) as resp:
+            raw_text = await resp.text()
+            logger.info(f"📄 Upload server response: status={resp.status}, body={raw_text[:300]}")
+
+            if resp.status != 200:
+                raise VKAPIError("docs.upload", resp.status, f"Doc upload failed: {raw_text[:200]}")
+
+            try:
+                upload_result = json.loads(raw_text)
+            except json.JSONDecodeError:
+                raise VKAPIError("docs.upload", resp.status, f"Non-JSON response: {raw_text[:200]}")
+
+            if "error" in upload_result:
+                raise VKAPIError("docs.upload", -1, f"Doc upload failed: {upload_result}")
+
+            if "file" not in upload_result:
+                raise VKAPIError("docs.upload", -1, f"Doc upload failed, missing 'file' key: {upload_result}")
+
+        # 3. Сохраняем документ
+        save_params = {
+            "file": upload_result["file"],
+            "title": filename  # Красивое имя с эмодзи для пользователя
+        }
+        if peer_id:
+            save_params["peer_id"] = peer_id
+
+        saved = await self.call("docs.save", **save_params)
+
+        doc_data = saved.get("doc", {})
+        owner_id = doc_data.get("owner_id")
+        doc_id = doc_data.get("id")
+
+        if not owner_id or not doc_id:
+            raise VKAPIError("docs.save", -1, f"Invalid save response: {saved}")
+
+        return f"doc{owner_id}_{doc_id}"

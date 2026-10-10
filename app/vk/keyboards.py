@@ -50,10 +50,15 @@ def get_dialog_keyboard() -> str:
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
+
 def get_regenerate_inline_keyboard() -> str:
-    """Только кнопка регенерации, прикрепленная к сообщению."""
+    """Только кнопки, прикрепленные к сообщению, вертикально."""
     kb = KeyboardBuilder(one_time=False, inline=True)
+
     kb.add_button("🔄 Перегенерировать (-1 ⚡)", payload={"cmd": "regenerate"}, color="secondary")
+    kb.row()  # 🔥 Принудительный перенос на новую строку
+    kb.add_button("🎨 Нарисовать этот момент (15 ⚡)", payload={"cmd": "generate_image"}, color="primary")
+
     return kb.to_json()
 
 

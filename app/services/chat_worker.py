@@ -6,6 +6,7 @@ import logging
 import re
 import random
 import copy
+import os
 from typing import Any
 from difflib import SequenceMatcher
 
@@ -15,6 +16,8 @@ from app.services.memory import maybe_generate_summary, build_llm_context
 from app.db.repositories.payments import PaymentRepository
 from app.vk.api import VKApi
 from app.config import get_settings, get_llm_settings
+import base64
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +25,13 @@ MAX_REGEN_ATTEMPTS = 2
 
 
 # ==============================================================================
-# 🔥 СПАСАТЕЛЬНЫЙ КРУГ: POLZA AI FALLBACK
+#  СПАСАТЕЛЬНЫЙ КРУГ: POLZA AI FALLBACK
 # ==============================================================================
 async def _rescue_with_polza(session, messages, settings) -> str | None:
     """Пытается получить ответ от Polza AI, чтобы перехватить ERROR_MESSAGES."""
     if not messages:
         return None
 
-    # Защита: если ключи Polza не настроены, не пытаемся даже стучаться
     if not getattr(settings, 'polza_api_key', None):
         logger.warning("⚠️ Polza API key not configured. Skipping rescue.")
         return None
@@ -37,7 +39,6 @@ async def _rescue_with_polza(session, messages, settings) -> str | None:
     try:
         from app.services.llm.routerai import LLMRouterAI
 
-        # Создаем настройки для Polza на лету
         polza_settings = type('PolzaSettings', (), {
             'api_key': settings.polza_api_key,
             'base_url': settings.polza_base_url,
@@ -47,13 +48,10 @@ async def _rescue_with_polza(session, messages, settings) -> str | None:
         })()
 
         polza_client = LLMRouterAI(session)
-
-        # 🔥 КРИТИЧЕСКИЙ ФИКС: Перезаписываем атрибуты, которые __init__ захватил от RouterAI
         polza_client.base_url = settings.polza_base_url
         polza_client.api_key = settings.polza_api_key
         polza_client._settings = polza_settings
 
-        # Копируем сообщения и добавляем строгий приказ не ломать роль
         messages_copy = copy.deepcopy(messages)
         messages_copy.append({
             "role": "system",
@@ -62,7 +60,6 @@ async def _rescue_with_polza(session, messages, settings) -> str | None:
 
         result = await polza_client.generate(messages_copy)
 
-        # Если Polza вернул нормальный текст — спасаем ситуацию
         if result.success and result.content and len(result.content.strip()) > 20:
             return _clean_response(_truncate(result.content))
 
@@ -85,14 +82,12 @@ def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], 
 
     last_msg = recent_assistant_msgs[-1]
 
-    # 1. Полный копипаст
     if len(new_response) > 30 and len(last_msg) > 30:
         sim = SequenceMatcher(None, new_response, last_msg).ratio()
         if sim > 0.85:
             logger.warning(f"🚨 HARD COPYPASTE DETECTED (sim={sim:.2f})")
             return True, ["Полный копипаст последнего ответа"]
 
-    # 2. Зацикливание действий
     def extract_actions(text: str) -> set[str]:
         actions = re.findall(r'\*([^*]+)\*', text.lower())
         return set(a.strip() for a in actions if len(a.strip()) > 8)
@@ -250,7 +245,7 @@ async def process_chat_task(
         summary_repo: Any,
         payment_repo: PaymentRepository,
 ) -> None:
-    logger.info("🎯 START task: user=%s char=%s text='%s'",
+    logger.info(" START task: user=%s char=%s text='%s'",
                 task.user_id, task.char_id, task.text[:50])
 
     is_start_message = task.text.startswith("[Начало диалога") or task.text.startswith("[СИСТЕМНАЯ КОМАНДА")
@@ -273,6 +268,13 @@ async def process_chat_task(
         return
 
     # ========================================================================
+    # 🔥 НОВАЯ ВЕТКА: ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ (через единую очередь)
+    # ========================================================================
+    if getattr(task, 'is_image_generation', False):
+        await _handle_image_generation(task, api, session, msg_repo, payment_repo)
+        return
+
+    # ========================================================================
     # СТАНДАРТНАЯ ВЕТКА: ТЕКСТОВЫЙ ДИАЛОГ
     # ========================================================================
     ERROR_MESSAGES = [
@@ -285,8 +287,6 @@ async def process_chat_task(
     is_real_answer = False
     is_fallback = False
     candidate_answer = ""
-
-    # Безопасная инициализация, чтобы избежать ошибок области видимости
     base_messages = []
 
     try:
@@ -377,7 +377,7 @@ async def process_chat_task(
                     logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying...")
                     continue
                 else:
-                    logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
+                    logger.warning(" FATAL LOOP: Model stuck. Using safe fallback.")
                     char_name = task.char_dict.get("name", "Персонаж")
                     answer = f"*{char_name} мягко переводит тему, заглядывая тебе в глаза с новой эмоцией.*"
                     is_real_answer = True
@@ -398,17 +398,13 @@ async def process_chat_task(
     except Exception:
         logger.exception("💥 CRITICAL error in chat worker")
 
-    # ========================================================================
-    # 🔥 ПОСЛЕДНИЙ РУБЕЖ ОБОРОНЫ: ГАРАНТИРОВАННЫЙ ОТВЕТ ПОЛЬЗОВАТЕЛЮ + ТЕСТ POLZA
-    # ========================================================================
     try:
-        # 🔥 ТЕСТОВАЯ ЗАГЛУШКА: Если админ пишет "тест полза", форсируем вызов Polza
         is_debug_force_polza = get_settings().is_admin(
             task.user_dict['vk_user_id']) and "тест полза" in task.text.lower()
 
         if not is_real_answer or is_debug_force_polza:
             if is_debug_force_polza:
-                logger.info("🧪 [DEBUG] Принудительный вызов Polza AI по команде админа")
+                logger.info(" [DEBUG] Принудительный вызов Polza AI по команде админа")
             else:
                 logger.info("🚨 Основной провайдер упал. Пытаемся перехватить ERROR_MESSAGES через Polza...")
 
@@ -427,13 +423,11 @@ async def process_chat_task(
                 if not answer or not answer.strip():
                     answer = random.choice(ERROR_MESSAGES)
 
-        # 1. Если ответа всё ещё нет (или он пустой), генерируем безопасную ролевую заглушку.
         if not answer or not answer.strip():
             char_name = task.char_dict.get("name", "Персонаж")
             answer = f"*{char_name} на мгновение замерла, словно обдумывая твои слова, и мягко перевела тему, заглянув тебе в глаза.*"
             logger.warning("⚠️ SAFETY NET: Пустой ответ заменен на безопасную ролевую паузу.")
 
-        # 2. Отправка с защитой от временных сбоев ВК (Error 10)
         max_send_attempts = 2
         for send_attempt in range(max_send_attempts):
             try:
@@ -443,17 +437,16 @@ async def process_chat_task(
                     keyboard=getattr(task, 'keyboard', None),
                     attachment=getattr(task, 'attachment', None),
                 )
-                break  # Успешно отправлено, выходим из цикла повторных попыток
+                break
 
             except Exception as vk_err:
                 logger.error(f"🚨 VK Send attempt {send_attempt + 1} failed for user {task.user_id}: {vk_err}")
                 if send_attempt == max_send_attempts - 1:
                     logger.critical(
-                        f"💥 FAILED TO SEND MESSAGE TO USER {task.user_id} AFTER {max_send_attempts} ATTEMPTS")
+                        f" FAILED TO SEND MESSAGE TO USER {task.user_id} AFTER {max_send_attempts} ATTEMPTS")
                 else:
-                    await asyncio.sleep(2)  # Ждем 2 секунды перед повторной попыткой
+                    await asyncio.sleep(2)
 
-        # 3. Логика списания энергии
         if not is_start_message and is_real_answer and not is_regeneration and not get_settings().is_admin(
                 task.user_dict['vk_user_id']):
             success = await payment_repo.use_message(task.user_id)
@@ -509,7 +502,6 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
     alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text_stripped))
     cyrillic_count = len(re.findall(r'[а-яА-ЯёЁ]', text_stripped))
 
-    # 🔥 Ловим артефакты токенизатора (Ġ = \u0120, Ċ = \u010a)
     tokenizer_artifacts = len(re.findall(r'[\u0120\u010a]', text_stripped))
     if tokenizer_artifacts > 2:
         return True, f"Обнаружен сбой токенизатора (Tokenizer leak): {tokenizer_artifacts} артефактов"
@@ -520,8 +512,194 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
     if total_len >= 20 and alpha_count > 25 and cyrillic_count == 0:
         return True, "Отсутствие кириллицы (DrunkSeek detected)"
 
-    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħĲİĬĮĸłÃÂ\u0120\u010a]', text_stripped))
+    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħİĬĮĸłÃÂ\u0120\u010a]', text_stripped))
     if mojibake_chars > 5:
         return True, "Обнаружена кодировочная каша (mojibake)"
 
     return False, ""
+
+
+# ==============================================================================
+# 🎨 МАГИЯ РИСОВАНИЯ: ФИНАЛЬНАЯ ПРОДАКШЕН-ВЕРСИЯ
+# ==============================================================================
+async def _handle_image_generation(
+        task: ChatTask,
+        api: VKApi,
+        session: Any,
+        msg_repo: Any,
+        payment_repo: PaymentRepository,
+) -> None:
+    """Генерация картинки с анализом истории, fallback на документы и защитой баланса."""
+    import base64
+    from pathlib import Path
+
+    logger.info("🎨 START image generation: user=%s", task.user_id)
+
+    cost = 15
+    char_name = task.char_dict.get("name", "Персонаж")
+    char_slug = task.char_dict.get("slug", "")
+
+    # 1. ПРОВЕРКА АДМИНА И БАЛАНСА (Защита №1)
+    vk_user_id = task.user_dict.get('vk_user_id', 0)
+    is_admin = get_settings().is_admin(vk_user_id)
+
+    if not is_admin:
+        balance = await payment_repo.get_user_balance(task.user_id)
+        if balance < cost:
+            await api.send_message(
+                peer_id=task.peer_id,
+                text=f"😿 У тебя не хватает энергии для магии рисования! Нужно {cost} ⚡, а у тебя {balance}."
+            )
+            return
+
+    # 2. Ищем локальный файл персонажа
+    char_image_path = None
+    if char_slug:
+        search_paths = [
+            Path(__file__).parent.parent / "images",
+            Path(__file__).parent / "images",
+            Path("images"),
+        ]
+        for search_dir in search_paths:
+            for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                candidate = search_dir / f"{char_slug}{ext}"
+                if candidate.exists():
+                    char_image_path = candidate
+                    logger.info(f"✅ Found character image at: {char_image_path}")
+                    break
+            if char_image_path:
+                break
+
+    if not char_image_path:
+        logger.warning(f"⚠️ No local image found for slug '{char_slug}'")
+
+    # 3. БЕРЕМ 6 ПОСЛЕДНИХ СООБЩЕНИЙ (Защита №3: экономный, но достаточный контекст)
+    recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=6)
+
+    scene_context = ""
+    if recent_history:
+        context_lines = []
+        for msg in recent_history:
+            role = "User" if msg["role"] == "user" else char_name
+            content = msg.get("content", "").replace('*', '').replace('—', '').strip()[:200]
+            context_lines.append(f"{role}: {content}")
+        scene_context = "\n".join(context_lines)
+    else:
+        scene_context = "casual everyday scene"
+
+    # 4. УМНЫЙ ПРОМПТ (Проверенный вами)
+    prompt = (
+        f"CHARACTER REFERENCE: Use the provided reference image to draw this EXACT character. "
+        f"STRICTLY KEEP: facial features, hair color and style, eye color, body type, and overall art style. "
+        f"\n\nDIALOGUE HISTORY:\n{scene_context}\n\n"
+        f"CRITICAL CLOTHING INSTRUCTION: Analyze the entire dialogue history above. "
+        f"If the User or character mentions ANY changes to clothing, accessories, or appearance "
+        f"(e.g., 'wearing a black skirt', 'put on a top', 'changed clothes'), you MUST draw the character "
+        f"wearing EXACTLY those items. The reference image is ONLY for facial features and character identity. "
+        f"Current outfit and pose must be determined SOLELY from the dialogue context. "
+        f"If no clothing changes are mentioned, keep the outfit from the reference image. "
+        f"\n\nSTYLE: high quality anime illustration, masterpiece, vibrant colors, beautiful lighting, "
+        f"safe for work, vk friendly, detailed background."
+    )
+
+    # 5. Кодируем оригинал в base64
+    reference_b64 = None
+    if char_image_path:
+        image_data = char_image_path.read_bytes()
+        b64 = base64.b64encode(image_data).decode('utf-8')
+        mime = "image/png" if char_image_path.suffix == ".png" else "image/jpeg"
+        reference_b64 = f"data:{mime};base64,{b64}"
+        logger.info(f"📸 Encoded reference image: {len(image_data)} bytes")
+
+    # 6. Генерируем картинку
+    from app.services.llm.routerai import LLMRouterAI
+    llm_client = LLMRouterAI(session)
+    settings = get_llm_settings()
+
+    image_result = await llm_client.generate_image(
+        prompt=prompt,
+        image_url=reference_b64,
+        model_override=getattr(settings, 'image_model', None)
+    )
+
+    # 7. Загрузка в ВК с FALLBACK на документы
+    temp_file_path = None
+    if image_result:
+        try:
+            if image_result["type"] == "url":
+                temp_file_path = Path("/tmp/vk_gen_photo.jpg")
+                async with api.session.get(image_result["value"]) as resp:
+                    resp.raise_for_status()
+                    temp_file_path.write_bytes(await resp.read())
+            else:
+                old_path = Path(image_result["value"])
+                temp_file_path = old_path.with_suffix(".jpg")
+                old_path.rename(temp_file_path)
+
+            # Пересохраняем через Pillow для совместимости с ВК
+            try:
+                from PIL import Image
+                with Image.open(temp_file_path) as img:
+                    img = img.convert("RGB")
+                    img.save(temp_file_path, "JPEG", quality=95)
+                logger.info("✅ Image re-saved for VK")
+            except Exception as e:
+                logger.warning(f"⚠️ Pillow re-save failed: {e}")
+
+            # ПОПЫТКА 1: Загрузить как фото
+            attachment_to_send = None
+            try:
+                attachment_to_send = await api.upload_generated_photo(temp_file_path)
+                logger.info("✅ Uploaded as photo")
+            except Exception as photo_err:
+                # ПОПЫТКА 2: Fallback на документ (если фото-сервер ВК штормит)
+                err_str = str(photo_err)
+                logger.warning(f"⚠️ Photo upload failed: {err_str}. Falling back to document upload...")
+
+                attachment_to_send = await api.upload_as_document(
+                    temp_file_path,
+                    filename=f"{char_name}_scene.jpg",
+                    peer_id=task.peer_id
+                )
+                logger.info("✅ Uploaded as document (fallback)")
+
+            await api.send_message(
+                peer_id=task.peer_id,
+                text=f"✨ Магия сработала! Вот как {char_name} выглядит в этот момент:",
+                attachment=attachment_to_send
+            )
+
+            # 🔥 ЗАЩИТА №2: Списание ТОЛЬКО при успешной отправке
+            if not is_admin:
+                success = await payment_repo.deduct_messages(task.user_id, cost)
+                if success:
+                    logger.info(f"✅ Image sent. Energy ({cost}) safely deducted.")
+                else:
+                    logger.warning("⚠️ Race condition: Failed to deduct energy (insufficient funds).")
+                    await api.send_message(
+                        peer_id=task.peer_id,
+                        text="😿 Упс! Пока я рисовала, у тебя закончилась энергия. Пополни баланс и попробуй снова!"
+                    )
+            else:
+                logger.info("🛡️ [ADMIN] Image sent. Energy deduction SKIPPED.")
+
+        except Exception as vk_err:
+            logger.error(f"❌ Upload failed: {vk_err}")
+            await api.send_message(
+                peer_id=task.peer_id,
+                text="😿 Картинка нарисована, но ВКонтакте капризничает. Попробуй через минуту! Энергия не списана."
+            )
+        finally:
+            # 🔥 ЗАЩИТА №5: Очистка временных файлов
+            if temp_file_path and temp_file_path.exists():
+                try:
+                    temp_file_path.unlink()
+                except Exception:
+                    pass
+    else:
+        telegram_bot_link = "@MyNekoBaka89_bot"
+        await api.send_message(
+            peer_id=task.peer_id,
+            text=f"😿 Фильтры ВК заблокировали запрос! 🛡️\n\nДля полной свободы переходи в Telegram: {telegram_bot_link}"
+        )
+        logger.info("⚠️ Blocked by moderation.")

@@ -65,6 +65,8 @@ class LLMSettings(BaseSettings):
     polza_base_url: str = "https://api.polza.ai/v1"
     polza_model: str = "deepseek/deepseek-v3.2"
 
+    image_model: str = "bytedance-seed/seedream-5-0-flash"
+
     max_tokens: int = 800
     temperature: float = 0.85  # 🔥 Безопасный баланс креатива и контроля
 

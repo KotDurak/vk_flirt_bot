@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from tkinter import BooleanVar
 from typing import Callable, Awaitable
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class ChatTask:
     is_regeneration: bool = False
     model_name: str | None = None
     photo_url: str | None = None
+    is_image_generation: bool = False
 
 
 class ChatQueue:
