@@ -24,6 +24,7 @@ from app.services.payments.factory import create_payment_provider  # ← НОВ�
 from app.services.event_cache import EventCache
 from app.db.repositories.promo import PromoRepository
 from app.db.repositories.support import SupportRepository
+from app.db.repositories.generations import GenerationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ async def run_bot() -> None:
     payment_repo = PaymentRepository(db)
     promo_repo = PromoRepository(db)
     support_repo = SupportRepository(db)
+    gen_repo = GenerationRepository(db)
 
     # === 2. Платёжная система ===
     payment_provider = create_payment_provider()  # ← НОВОЕ
@@ -79,7 +81,8 @@ async def run_bot() -> None:
             session=session,
             msg_repo=msg_repo,
             summary_repo=summary_repo,
-            payment_repo=payment_repo,  # ← НОВОЕ: для списания сообщений
+            payment_repo=payment_repo,
+            gen_repo=gen_repo,
         )
 
         # Запускаем воркеры

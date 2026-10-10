@@ -199,5 +199,23 @@ async def run_migrations(db: Database) -> None:
         "BOOLEAN DEFAULT FALSE"
     )
 
+    # === ТАБЛИЦА ЛОГОВ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ (Для кулдауна и статистики) ===
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_generations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            error_reason TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+    """)
+
+    # Индекс для мгновенной проверки последней попытки конкретного пользователя
+    await conn.execute("""
+           CREATE INDEX IF NOT EXISTS idx_user_generations_user_time 
+           ON user_generations(user_id, attempted_at DESC);
+       """)
+
     await conn.commit()
     logger.info("Migrations completed successfully. Database is clean and ready.")
