@@ -520,7 +520,7 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
 
 
 # ==============================================================================
-# 🎨 МАГИЯ РИСОВАНИЯ: ФИНАЛЬНАЯ ПРОДАКШЕН-ВЕРСИЯ
+# 🎨 МАГИЯ РИСОВАНИЯ: С УМНОЙ ВЫЖИМКОЙ СОСТОЯНИЯ (STATE EXTRACTION)
 # ==============================================================================
 async def _handle_image_generation(
         task: ChatTask,
@@ -529,7 +529,7 @@ async def _handle_image_generation(
         msg_repo: Any,
         payment_repo: PaymentRepository,
 ) -> None:
-    """Генерация картинки с анализом истории, fallback на документы и защитой баланса."""
+    """Генерация картинки с предварительным анализом истории дешевой текстовой моделью."""
     import base64
     from pathlib import Path
 
@@ -539,7 +539,7 @@ async def _handle_image_generation(
     char_name = task.char_dict.get("name", "Персонаж")
     char_slug = task.char_dict.get("slug", "")
 
-    # 1. ПРОВЕРКА АДМИНА И БАЛАНСА (Защита №1)
+    # 1. ПРОВЕРКА АДМИНА И БАЛАНСА
     vk_user_id = task.user_dict.get('vk_user_id', 0)
     is_admin = get_settings().is_admin(vk_user_id)
 
@@ -551,6 +551,11 @@ async def _handle_image_generation(
                 text=f"😿 У тебя не хватает энергии для магии рисования! Нужно {cost} ⚡, а у тебя {balance}."
             )
             return
+    # 🔥 СООБЩЕНИЕ О НАЧАЛЕ ГЕНЕРАЦИИ
+    await api.send_message(
+        peer_id=task.peer_id,
+        text="⏳ Художник уже взял в руки кисть! Генерирую изображение, подождите немного..."
+    )
 
     # 2. Ищем локальный файл персонажа
     char_image_path = None
@@ -565,53 +570,73 @@ async def _handle_image_generation(
                 candidate = search_dir / f"{char_slug}{ext}"
                 if candidate.exists():
                     char_image_path = candidate
-                    logger.info(f"✅ Found character image at: {char_image_path}")
                     break
             if char_image_path:
                 break
 
-    if not char_image_path:
-        logger.warning(f"⚠️ No local image found for slug '{char_slug}'")
+    # 3. 🔥 БЕРЕМ БОЛЬШУЮ ИСТОРИЮ (15 сообщений) для анализа
+    recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=15)
 
-    # 3. БЕРЕМ 6 ПОСЛЕДНИХ СООБЩЕНИЙ (Защита №3: экономный, но достаточный контекст)
-    recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=6)
-
-    scene_context = ""
+    history_text = ""
     if recent_history:
-        context_lines = []
+        lines = []
         for msg in recent_history:
             role = "User" if msg["role"] == "user" else char_name
-            content = msg.get("content", "").replace('*', '').replace('—', '').strip()[:200]
-            context_lines.append(f"{role}: {content}")
-        scene_context = "\n".join(context_lines)
-    else:
-        scene_context = "casual everyday scene"
+            # Обрезаем длинные сообщения, чтобы не жечь токены зря
+            content = msg.get("content", "").replace('*', '').replace('—', '').strip()[:150]
+            lines.append(f"{role}: {content}")
+        history_text = "\n".join(lines)
 
-    # 4. УМНЫЙ ПРОМПТ (Проверенный вами)
+    # 4. 🔥 ВЫЖИМКА ВИЗУАЛЬНОГО СОСТОЯНИЯ (Стоит копейки, экономит рубли)
+    visual_state = "default outfit from reference image"
+
+    if history_text:
+        try:
+            from app.services.llm.routerai import LLMRouterAI
+            llm_client = LLMRouterAI(session)
+
+            extract_prompt = (
+                f"Analyze the dialogue and extract the CURRENT visual state of the character {char_name}. "
+                f"Focus ONLY on: clothing, accessories, hairstyle changes, current location, and pose. "
+                f"Ignore dialogue, emotions, and plot. "
+                f"Output a short, comma-separated list of visual tags in English. "
+                f"Example: 'black short skirt, open crop top, lace stockings, sitting on bed'. "
+                f"If no specific clothing is mentioned, output EXACTLY: 'default outfit from reference image'.\n\n"
+                f"DIALOGUE:\n{history_text}\n\n"
+                f"VISUAL STATE:"
+            )
+
+            # Используем стандартный текстовый вызов (дешево и быстро)
+            text_result = await llm_client.generate([{"role": "user", "content": extract_prompt}])
+
+            if text_result.success and text_result.content:
+                visual_state = text_result.content.strip()
+                logger.info(f"✅ Extracted visual state: {visual_state}")
+            else:
+                logger.warning("⚠️ Visual extraction failed, using default.")
+        except Exception as e:
+            logger.warning(f"⚠️ Visual extraction error: {e}")
+
+    # 5. Формируем промпт для рисовалки
     prompt = (
         f"CHARACTER REFERENCE: Use the provided reference image to draw this EXACT character. "
         f"STRICTLY KEEP: facial features, hair color and style, eye color, body type, and overall art style. "
-        f"\n\nDIALOGUE HISTORY:\n{scene_context}\n\n"
-        f"CRITICAL CLOTHING INSTRUCTION: Analyze the entire dialogue history above. "
-        f"If the User or character mentions ANY changes to clothing, accessories, or appearance "
-        f"(e.g., 'wearing a black skirt', 'put on a top', 'changed clothes'), you MUST draw the character "
-        f"wearing EXACTLY those items. The reference image is ONLY for facial features and character identity. "
-        f"Current outfit and pose must be determined SOLELY from the dialogue context. "
-        f"If no clothing changes are mentioned, keep the outfit from the reference image. "
+        f"\n\nCURRENT VISUAL STATE: {visual_state}\n\n"
+        f"Draw the character exactly as described in the VISUAL STATE above. "
+        f"The reference image is ONLY for facial features and character identity. "
         f"\n\nSTYLE: high quality anime illustration, masterpiece, vibrant colors, beautiful lighting, "
         f"safe for work, vk friendly, detailed background."
     )
 
-    # 5. Кодируем оригинал в base64
+    # 6. Кодируем оригинал в base64
     reference_b64 = None
     if char_image_path:
         image_data = char_image_path.read_bytes()
         b64 = base64.b64encode(image_data).decode('utf-8')
         mime = "image/png" if char_image_path.suffix == ".png" else "image/jpeg"
         reference_b64 = f"data:{mime};base64,{b64}"
-        logger.info(f"📸 Encoded reference image: {len(image_data)} bytes")
 
-    # 6. Генерируем картинку
+    # 7. Генерируем картинку
     from app.services.llm.routerai import LLMRouterAI
     llm_client = LLMRouterAI(session)
     settings = get_llm_settings()
@@ -622,7 +647,7 @@ async def _handle_image_generation(
         model_override=getattr(settings, 'image_model', None)
     )
 
-    # 7. Загрузка в ВК с FALLBACK на документы
+    # 8. Загрузка в ВК с FALLBACK на документы
     temp_file_path = None
     if image_result:
         try:
@@ -636,32 +661,27 @@ async def _handle_image_generation(
                 temp_file_path = old_path.with_suffix(".jpg")
                 old_path.rename(temp_file_path)
 
-            # Пересохраняем через Pillow для совместимости с ВК
+            # Пересохраняем через Pillow
             try:
                 from PIL import Image
                 with Image.open(temp_file_path) as img:
                     img = img.convert("RGB")
                     img.save(temp_file_path, "JPEG", quality=95)
-                logger.info("✅ Image re-saved for VK")
             except Exception as e:
-                logger.warning(f"⚠️ Pillow re-save failed: {e}")
+                logger.warning(f"️ Pillow re-save failed: {e}")
 
-            # ПОПЫТКА 1: Загрузить как фото
+            # ПОПЫТКА 1: Фото
             attachment_to_send = None
             try:
                 attachment_to_send = await api.upload_generated_photo(temp_file_path)
-                logger.info("✅ Uploaded as photo")
             except Exception as photo_err:
-                # ПОПЫТКА 2: Fallback на документ (если фото-сервер ВК штормит)
-                err_str = str(photo_err)
-                logger.warning(f"⚠️ Photo upload failed: {err_str}. Falling back to document upload...")
-
+                # ПОПЫТКА 2: Документ
+                logger.warning(f"⚠️ Photo upload failed. Falling back to document...")
                 attachment_to_send = await api.upload_as_document(
                     temp_file_path,
                     filename=f"{char_name}_scene.jpg",
                     peer_id=task.peer_id
                 )
-                logger.info("✅ Uploaded as document (fallback)")
 
             await api.send_message(
                 peer_id=task.peer_id,
@@ -669,28 +689,23 @@ async def _handle_image_generation(
                 attachment=attachment_to_send
             )
 
-            # 🔥 ЗАЩИТА №2: Списание ТОЛЬКО при успешной отправке
+            # Списание энергии
             if not is_admin:
                 success = await payment_repo.deduct_messages(task.user_id, cost)
                 if success:
                     logger.info(f"✅ Image sent. Energy ({cost}) safely deducted.")
                 else:
-                    logger.warning("⚠️ Race condition: Failed to deduct energy (insufficient funds).")
-                    await api.send_message(
-                        peer_id=task.peer_id,
-                        text="😿 Упс! Пока я рисовала, у тебя закончилась энергия. Пополни баланс и попробуй снова!"
-                    )
+                    await api.send_message(peer_id=task.peer_id, text="😿 Пока я рисовала, у тебя закончилась энергия!")
             else:
                 logger.info("🛡️ [ADMIN] Image sent. Energy deduction SKIPPED.")
 
         except Exception as vk_err:
-            logger.error(f"❌ Upload failed: {vk_err}")
+            logger.error(f" Upload failed: {vk_err}")
             await api.send_message(
                 peer_id=task.peer_id,
                 text="😿 Картинка нарисована, но ВКонтакте капризничает. Попробуй через минуту! Энергия не списана."
             )
         finally:
-            # 🔥 ЗАЩИТА №5: Очистка временных файлов
             if temp_file_path and temp_file_path.exists():
                 try:
                     temp_file_path.unlink()
@@ -702,4 +717,3 @@ async def _handle_image_generation(
             peer_id=task.peer_id,
             text=f"😿 Фильтры ВК заблокировали запрос! 🛡️\n\nДля полной свободы переходи в Telegram: {telegram_bot_link}"
         )
-        logger.info("⚠️ Blocked by moderation.")
