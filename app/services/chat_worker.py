@@ -665,6 +665,8 @@ async def _handle_image_generation(
     # 7. Формируем промпт для рисовалки
     prompt = (
         f"CHARACTER REFERENCE: Use the provided reference image for facial features, hair color/style, eye color, and body type ONLY. "
+        f"CRITICAL: DO NOT copy the facial expression, tongue position, or mouth shape from the reference image. "
+        f"The expression must match the mood of the scene naturally (calm, smiling, serious, etc.). "
         f"CRITICAL: DO NOT copy the reference image's clothing or pose unless the VISUAL STATE explicitly says so. "
         f"\n\nVISUAL STATE (Current outfit and pose):\n{visual_state}\n\n"
         f"SCENE CONTEXT (For atmosphere and details):\n{history_text}\n\n"
