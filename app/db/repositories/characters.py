@@ -129,6 +129,19 @@ class CharacterRepository:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_by_slug(self, slug: str) -> Optional[dict]:
+        conn = self.db.connection
+        filter_clause, params = self._get_active_filter()
+        query_params = params + [slug.lower()]
+
+        cursor = await conn.execute(
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            f"FROM characters WHERE slug = ? AND {filter_clause}",
+            query_params
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
 COMMON_RP_PROMPT = """
 ### ИНСТРУКЦИИ ДЛЯ ОТЫГРЫША ###
 

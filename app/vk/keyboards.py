@@ -16,7 +16,7 @@ def get_main_menu_keyboard() -> str:
     kb.add_button("🎁 Ввести промокод", payload={"cmd": "promo"}, color="secondary")
     kb.row()
 
-    # 🆕 НОВАЯ КНОПКА РЕФЕРАЛЬНОЙ СИСТЕМЫ
+    #  НОВАЯ КНОПКА РЕФЕРАЛЬНОЙ СИСТЕМЫ
     kb.add_button("💸 Заработать энергию", payload={"cmd": "referral"}, color="secondary")
     kb.row()
 
@@ -28,7 +28,18 @@ def get_main_menu_keyboard() -> str:
     # Опасное действие
     kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
 
-    return kb.to_json()
+    # === ДОБАВЛЕНИЕ: Кнопка-ссылка на Mini App (каталог персонажей) ===
+    keyboard_json = json.loads(kb.to_json())
+    keyboard_json["buttons"].append([
+        {
+            "action": {
+                "type": "open_link",
+                "link": "https://vk.ru/app54816075",
+                "label": " Открыть каталог персонажей"
+            }
+        }
+    ])
+    return json.dumps(keyboard_json)
 
 
 def get_admin_promo_list_keyboard(page: int, total_pages: int) -> str:
@@ -110,7 +121,18 @@ def get_characters_paginated_keyboard(characters: list[dict], page: int, total_p
     kb.row()
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
 
-    return kb.to_json()
+    # === ДОБАВЛЕНИЕ: Кнопка-ссылка на Mini App (каталог с фильтрами) ===
+    keyboard_json = json.loads(kb.to_json())
+    keyboard_json["buttons"].append([
+        {
+            "action": {
+                "type": "open_link",
+                "link": "https://vk.ru/app54816075",
+                "label": "🎭 Открыть каталог с фильтрами"
+            }
+        }
+    ])
+    return json.dumps(keyboard_json)
 
 
 def get_character_actions_keyboard(char_id: int) -> str:

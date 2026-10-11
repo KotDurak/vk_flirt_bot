@@ -123,8 +123,66 @@ async def handle_update(
     attachment = None
     settings = get_llm_settings()
 
+    # === ВЫБОР ПЕРСОНАЖА ПО SLUG (Команда /select) ===
+    if text_lower == "/select" or text_lower.startswith("/select "):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            slug = parts[1].strip().lower()
+            character = await char_repo.get_by_slug(slug)
+
+            if not character:
+                answer = f"😿 Персонаж '{slug}' не найден. Проверь правильность написания или выбери из меню."
+                send_keyboard = get_main_menu_keyboard()
+            else:
+                old_char = await char_repo.get_user_character(user["id"])
+
+                if old_char and old_char["id"] != character["id"]:
+                    await msg_repo.clear_history(user["id"], old_char["id"])
+                    await summary_repo.clear_summary(user["id"], old_char["id"])
+                    logger.info("🧹 Cleared history for old character %s", old_char["id"])
+
+                await char_repo.set_user_character(user["id"], character["id"])
+                await msg_repo.clear_history(user["id"], character["id"])
+                await summary_repo.clear_summary(user["id"], character["id"])
+
+                answer = (
+                    f"✨ {character['name']}\n\n"
+                    f"{character['description']}\n\n"
+                    f"Выбор сохранен! Что будем делать?"
+                )
+                send_keyboard = get_character_actions_keyboard(character["id"])
+
+                if character.get("photo_attachment"):
+                    attachment = character["photo_attachment"]
+        else:
+            # Пользователь написал просто /select без аргумента
+            answer = (
+                "⚠️ **Как выбрать персонажа:**\n\n"
+                "Самый удобный способ — использовать наш интерактивный каталог с поиском и фильтрами! Просто нажми на кнопку ниже 👇\n\n"
+                "Или напиши вручную: `/select <имя>`\n"
+                "Примеры:\n"
+                "• `/select slani`\n"
+                "• `/select khori`\n"
+                "• `/select barsik`"
+            )
+            # Нативная кнопка-ссылка VK
+            send_keyboard = {
+                "inline": True,
+                "buttons": [
+                    [
+                        {
+                            "action": {
+                                "type": "open_link",
+                                "link": "https://vk.ru/app54816075",
+                                "label": "🎭 Открыть каталог персонажей"
+                            }
+                        }
+                    ]
+                ]
+            }
+
     # === ГЛАВНОЕ МЕНЮ ===
-    if text_lower == "начать" or cmd == "start":
+    elif text_lower == "начать" or cmd == "start":
         balance = await payment_repo.get_user_balance(user["id"])
         answer = (
             f"Привет! 👋 Я твой виртуальный компаньон для общения.\n\n"
@@ -173,7 +231,7 @@ async def handle_update(
             answer += "Нажми на имя персонажа ниже, чтобы выбрать его 👇"
             send_keyboard = get_characters_paginated_keyboard(page_chars, page, total_pages)
 
-    # === ВЫБОР КОНКРЕТНОГО ПЕРСОНАЖА ===
+    # === ВЫБОР КОНКРЕТНОГО ПЕРСОНАЖА (через кнопку) ===
     elif cmd == "select_char":
         char_id = payload.get("char_id")
         character = await char_repo.get_by_id(char_id)
@@ -630,7 +688,6 @@ async def handle_update(
             balance = await payment_repo.get_user_balance(user["id"])
             target_model = settings.model
 
-            # 🔥 ФИКС: Админу не показываем ошибку баланса
             if balance <= 0 and not is_admin:
                 char_name = current_char["name"]
                 answer = (
@@ -645,7 +702,6 @@ async def handle_update(
                     answer = "Нечего перегенерировать. Напиши что-нибудь первым! 😉"
                     send_keyboard = get_dialog_keyboard()
                 else:
-                    # 🔥 ФИКС: Списание энергии ТОЛЬКО если это не админ
                     if not is_admin:
                         success = await payment_repo.deduct_messages(user["id"], 1)
                         if not success:
@@ -654,20 +710,15 @@ async def handle_update(
                             await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                             return
 
-                    # 1. Удаляем неудачный ответ ассистента из БД
                     await msg_repo.delete_last_assistant_message(user["id"], current_char["id"])
-
-                    # 2. Берем текст последнего сообщения ПОЛЬЗОВАТЕЛЯ
                     last_user_text = history[-2]["content"]
 
-                    # 3. Индикатор загрузки
                     await api.send_message(
                         peer_id=int(peer_id),
                         text="🔄 Перегенерация ответа..."
                     )
                     active_model = user.get("preferred_model") or target_model
 
-                    # 4. Отправляем задачу в очередь заново
                     await chat_queue.add(ChatTask(
                         user_id=user["id"],
                         char_id=current_char["id"],
@@ -695,7 +746,7 @@ async def handle_update(
                 peer_id=int(peer_id),
                 text="[GENERATE_IMAGE]",
                 user_dict=user,
-                char_dict=current_char,  # сюда уже попадает slug из БД
+                char_dict=current_char,
                 keyboard=get_regenerate_inline_keyboard(),
                 is_image_generation=True
             ))
@@ -838,7 +889,6 @@ async def handle_update(
                 balance = await payment_repo.get_user_balance(user["id"])
                 is_admin = get_settings().is_admin(int(from_id))
 
-                # 🔥 ФИКС: Админу не блокируем чат при нулевом балансе
                 if balance <= 0 and not is_admin:
                     char_name = current_char["name"]
                     answer = (
@@ -883,7 +933,6 @@ async def handle_update(
                 target_model = settings.model
                 balance = await payment_repo.get_user_balance(user["id"])
 
-                # 🔥 ФИКС: Здесь тоже добавим проверку админа на всякий случай, хотя обычно админ пишет через /chat
                 is_admin = get_settings().is_admin(int(from_id))
                 if balance <= 0 and not is_admin:
                     char_name = current_char["name"]
