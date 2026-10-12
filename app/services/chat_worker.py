@@ -76,7 +76,8 @@ def _truncate(value: str, limit: int = 1500) -> str:
     return value[: limit - 1] + "…"
 
 
-def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[bool, list[str]]:
+def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[
+    bool, list[str]]:
     """Детектор зацикливания: ловит копипаст и повторяющиеся действия."""
     if len(recent_assistant_msgs) < 2:
         return False, []
@@ -161,6 +162,9 @@ async def _handle_photo_message(
 ) -> None:
     logger.info("📸 Processing photo for user %s", task.user_id)
 
+    # 🔥 ПОДДЕРЖКА: Проверяем, является ли персонаж поддержкой
+    is_support = task.char_dict.get("is_support", False)
+
     char_name = task.char_dict.get("name", "Персонаж")
     char_traits = task.char_dict.get("traits", "Добрый и отзывчивый персонаж.")
 
@@ -225,7 +229,8 @@ async def _handle_photo_message(
             keyboard=getattr(task, 'keyboard', None),
         )
 
-        if not task.text.startswith("[СИСТЕМНАЯ КОМАНДА"):
+        # 🔥 ПОДДЕРЖКА: Не списываем энергию, если это поддержка
+        if not task.text.startswith("[СИСТЕМНАЯ КОМАНДА") and not is_support:
             await payment_repo.use_message(task.user_id)
 
         logger.info("🏁 FINISHED photo task for user=%s", task.user_id)
@@ -253,7 +258,11 @@ async def process_chat_task(
     is_start_message = task.text.startswith("[Начало диалога") or task.text.startswith("[СИСТЕМНАЯ КОМАНДА")
     is_regeneration = getattr(task, 'is_regeneration', False)
 
-    if not is_start_message and not is_regeneration:
+    # 🔥 ПОДДЕРЖКА: Определяем, является ли текущий персонаж поддержкой
+    is_support = task.char_dict.get("is_support", False)
+
+    # 🔥 ПОДДЕРЖКА: Пропускаем проверку баланса для поддержки
+    if not is_start_message and not is_regeneration and not is_support:
         balance = await payment_repo.get_user_balance(task.user_id)
         if balance <= 0:
             logger.warning("️ User %s has no messages left", task.user_id)
@@ -304,7 +313,7 @@ async def process_chat_task(
             session=session, llm=llm,
             msg_repo=msg_repo, summary_repo=summary_repo,
             user_id=task.user_id, character_id=task.char_id,
-            model_override=getattr(task, 'model_name', None)
+            model_override=getattr(task, 'model_name', None)  # Уже передает нужную модель!
         )
 
         await asyncio.sleep(0.5)
@@ -312,7 +321,7 @@ async def process_chat_task(
         base_messages = await build_llm_context(
             msg_repo=msg_repo, summary_repo=summary_repo,
             user_id=task.user_id, character_id=task.char_id,
-            system_prompt=task.char_dict["system_prompt"],
+            system_prompt=task.char_dict["system_prompt"],  # Уже содержит SUPPORT_SYSTEM_PROMPT для Ами!
         )
 
         historical_assistant_msgs = [
@@ -338,6 +347,7 @@ async def process_chat_task(
                 })
 
             try:
+                # 🔥 ПОДДЕРЖКА: model_override уже содержит 'mistralai/mistral-nemo' для Ами
                 result = await llm.generate(messages_to_send, model_override=getattr(task, 'model_name', None))
             finally:
                 if attempt > 0 and base_settings is not None:
@@ -380,24 +390,36 @@ async def process_chat_task(
                 is_fallback = True
                 break
 
-            is_dup, bad_phrases = _is_duplicate_response(candidate_answer, historical_assistant_msgs, task.text)
+            # 🔥 ПОДДЕРЖКА: Для Ами проверка анти-цикла отключена.
+            # Поддержка может и должна повторять факты — это нормально для FAQ-бота.
+            is_support = task.char_dict.get("is_support", False)
 
-            if is_dup:
-                if attempt < MAX_REGEN_ATTEMPTS:
-                    logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying...")
-                    continue
-                else:
-                    logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
-                    char_name = task.char_dict.get("name", "Персонаж")
-                    answer = f"*{char_name} мягко переводит тему, заглядывая тебе в глаза с новой эмоцией.*"
-                    is_real_answer = True
-                    is_fallback = True
-                    break
-            else:
+            if is_support:
+                # Для поддержки просто принимаем ответ без проверки цикла
                 answer = candidate_answer
                 is_real_answer = True
-                logger.info("✅ Answer accepted (clean): '%s'", answer[:100])
+                logger.info("✅ Support answer accepted (no loop check): '%s'", answer[:100])
                 break
+            else:
+                # Для RP-персонажей проверка цикла остается
+                is_dup, bad_phrases = _is_duplicate_response(candidate_answer, historical_assistant_msgs, task.text)
+
+                if is_dup:
+                    if attempt < MAX_REGEN_ATTEMPTS:
+                        logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying...")
+                        continue
+                    else:
+                        logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
+                        char_name = task.char_dict.get("name", "Персонаж")
+                        answer = f"*{char_name} мягко переводит тему, заглядывая тебе в глаза с новой эмоцией.*"
+                        is_real_answer = True
+                        is_fallback = True
+                        break
+                else:
+                    answer = candidate_answer
+                    is_real_answer = True
+                    logger.info("✅ Answer accepted (clean): '%s'", answer[:100])
+                    break
 
         if is_real_answer and not is_fallback:
             await msg_repo.add_message(task.user_id, task.char_id, "assistant", answer)
@@ -412,7 +434,8 @@ async def process_chat_task(
         is_debug_force_polza = get_settings().is_admin(
             task.user_dict['vk_user_id']) and "тест полза" in task.text.lower()
 
-        if not is_real_answer or is_debug_force_polza:
+        # 🔥 ПОДДЕРЖКА: Не используем платный Polza fallback для Ами
+        if not is_support and (not is_real_answer or is_debug_force_polza):
             if is_debug_force_polza:
                 logger.info("🔧 [DEBUG] Принудительный вызов Polza AI по команде админа")
             else:
@@ -432,6 +455,12 @@ async def process_chat_task(
                 logger.warning("💥 Polza AI тоже не смог. Возвращаем стандартный ERROR_MESSAGES.")
                 if not answer or not answer.strip():
                     answer = random.choice(ERROR_MESSAGES)
+
+        # 🔥 ПОДДЕРЖКА: Если Polza не вызывался и ответа нет, используем безопасный fallback
+        elif is_support and not is_real_answer:
+            logger.warning("️ Support model failed. Using safe fallback without Polza.")
+            if not answer or not answer.strip():
+                answer = "Ой, что-то я задумалась...  Попробуй переформулировать вопрос или нажми '🔄 Перегенерировать'!"
 
         if not answer or not answer.strip():
             char_name = task.char_dict.get("name", "Персонаж")
@@ -457,7 +486,8 @@ async def process_chat_task(
                 else:
                     await asyncio.sleep(2)
 
-        if not is_start_message and is_real_answer and not is_regeneration and not get_settings().is_admin(
+        # 🔥 ПОДДЕРЖКА: Не списываем энергию, если это поддержка
+        if not is_start_message and is_real_answer and not is_regeneration and not is_support and not get_settings().is_admin(
                 task.user_dict['vk_user_id']):
             success = await payment_repo.use_message(task.user_id)
             if success:
@@ -509,22 +539,28 @@ def _is_drunk_response(text: str) -> tuple[bool, str]:
 
     text_stripped = text.strip()
     total_len = len(text_stripped)
-    alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text_stripped))
-    cyrillic_count = len(re.findall(r'[а-яА-ЯёЁ]', text_stripped))
 
+    # Считаем и русские, и английские буквы как валидные символы
+    alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text_stripped))
+
+    # 1. Сбой токенизатора (BPE artifacts) — всегда брак
     tokenizer_artifacts = len(re.findall(r'[\u0120\u010a]', text_stripped))
     if tokenizer_artifacts > 2:
         return True, f"Обнаружен сбой токенизатора (Tokenizer leak): {tokenizer_artifacts} артефактов"
 
+    # 2. Пустой мусор (слишком мало букв для такой длины текста)
     if total_len > 5 and alpha_count < 3:
         return True, f"Пустой мусор (букв: {alpha_count}, длина: {total_len})"
 
-    if total_len >= 20 and alpha_count > 25 and cyrillic_count == 0:
-        return True, "Отсутствие кириллицы (DrunkSeek detected)"
-
-    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħİĮĸłÃÂ\u0120\u010a]', text_stripped))
+    # 3. Mojibake (каша из символов сломанной кодировки) — всегда брак
+    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħİĮłÃÂ\u0120\u010a]', text_stripped))
     if mojibake_chars > 5:
         return True, "Обнаружена кодировочная каша (mojibake)"
+
+    # 🔥 УБРАЛИ: Проверку на отсутствие кириллицы.
+    # Если модель ответит на чистом английском — это валидный ответ.
+    # Если она начнет лепить бессвязный бред — это уже вопрос к промпту,
+    # и тогда мы будем ругать Пушка.
 
     return False, ""
 
@@ -645,8 +681,6 @@ async def _handle_image_generation(
                 f"VISUAL TAGS:"
             )
 
-            # 🔥 КЛЮЧЕВОЙ ФИКС: allow_short_response=True
-            # Короткий ответ типа "silk dress, sitting at table" — это ИДЕАЛЬНЫЙ результат выжимки.
             text_result = await llm.generate(
                 [{"role": "user", "content": extract_prompt}],
                 allow_short_response=True,

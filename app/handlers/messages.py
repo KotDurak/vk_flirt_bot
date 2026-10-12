@@ -36,6 +36,7 @@ from app.vk.keyboards import (
     get_admin_ticket_list_keyboard,
     get_admin_ticket_actions_keyboard,
     get_referral_keyboard,
+    get_no_energy_keyboard,
 )
 from app.utils import (
     _extract_message,
@@ -155,7 +156,6 @@ async def handle_update(
                 if character.get("photo_attachment"):
                     attachment = character["photo_attachment"]
         else:
-            # Пользователь написал просто /select без аргумента
             answer = (
                 "⚠️ **Как выбрать персонажа:**\n\n"
                 "Самый удобный способ — использовать наш интерактивный каталог с поиском и фильтрами! Просто нажми на кнопку ниже 👇\n\n"
@@ -165,7 +165,6 @@ async def handle_update(
                 "• `/select khori`\n"
                 "• `/select barsik`"
             )
-            # Нативная кнопка-ссылка VK
             send_keyboard = {
                 "inline": True,
                 "buttons": [
@@ -200,6 +199,26 @@ async def handle_update(
             "Поделись кодом! Когда друг введет его и напишет мне, он получит 10 энергии, а ты — 5 в качестве благодарности за рекомендацию."
         )
         send_keyboard = get_referral_keyboard(referral_code)
+    elif cmd == "ami_support":
+        # 🔥 ПЕРЕХОД К АМИ (ПОДДЕРЖКА)
+        ami_char = await char_repo.get_by_slug("support_ami")
+        if ami_char:
+            # Переключаем пользователя на Ами
+            await char_repo.set_user_character(user["id"], ami_char["id"])
+            await msg_repo.clear_history(user["id"], ami_char["id"])
+            await summary_repo.clear_summary(user["id"], ami_char["id"])
+
+            answer = (
+                f"✨ {ami_char['name']}\n\n"
+                f"{ami_char['description']}\n\n"
+                f"Привет! Я здесь, чтобы помочь с вопросами по боту или просто поболтать. Чем могу быть полезна? 🐾"
+            )
+            send_keyboard = get_dialog_keyboard()
+            if ami_char.get("photo_attachment"):
+                attachment = ami_char["photo_attachment"]
+        else:
+            answer = "К сожалению, Ами сейчас недоступна. Попробуй позже или используй кнопку '🆘 Сообщить о проблеме'."
+            send_keyboard = get_main_menu_keyboard()
 
     # === СПИСОК ПЕРСОНАЖЕЙ ===
     elif cmd == "chars" or text_lower in ("персонажи", "выбрать персонажа", "персонаж"):
@@ -694,7 +713,7 @@ async def handle_update(
                     f"😿 {char_name} устала и ей нужно отдохнуть!\n\n"
                     f"Чтобы продолжить, пополни энергию или используй промокод (команда `/promo`).\n\n"
                 )
-                send_keyboard = get_payment_keyboard()
+                send_keyboard = get_no_energy_keyboard()
             else:
                 history = await msg_repo.get_recent_history(user["id"], current_char["id"], limit=2)
 
@@ -732,7 +751,6 @@ async def handle_update(
                     ))
                     return
 
-    # === МАГИЯ РИСОВАНИЯ ===
     elif cmd == "generate_image":
         current_char = await char_repo.get_user_character(user["id"])
 
@@ -740,17 +758,26 @@ async def handle_update(
             answer = "Сначала выбери персонажа, чью магию ты хочешь увидеть! 👇"
             send_keyboard = get_main_menu_keyboard()
         else:
-            await chat_queue.add(ChatTask(
-                user_id=user["id"],
-                char_id=current_char["id"],
-                peer_id=int(peer_id),
-                text="[GENERATE_IMAGE]",
-                user_dict=user,
-                char_dict=current_char,
-                keyboard=get_regenerate_inline_keyboard(),
-                is_image_generation=True
-            ))
-            return
+            # 🔥 ДОБАВЬ ПРОВЕРКУ БАЛАНСА ЗДЕСЬ
+            balance = await payment_repo.get_user_balance(user["id"])
+            is_admin = get_settings().is_admin(int(from_id))
+
+            if balance < 15 and not is_admin:
+                answer = f"😿 У тебя не хватает энергии! Нужно 15 , а у тебя {balance}. Пополни баланс!"
+                send_keyboard = get_payment_keyboard()
+            else:
+                # Только если баланс достаточный — добавляем в очередь
+                await chat_queue.add(ChatTask(
+                    user_id=user["id"],
+                    char_id=current_char["id"],
+                    peer_id=int(peer_id),
+                    text="[GENERATE_IMAGE]",
+                    user_dict=user,
+                    char_dict=current_char,
+                    keyboard=get_regenerate_inline_keyboard(),
+                    is_image_generation=True
+                ))
+                return  # 🔥 ВАЖНО: не отправляем answer в конце функции
 
     elif cmd == "copy_referral":
         code = payload.get("code", "")
@@ -898,7 +925,7 @@ async def handle_update(
                         f"🎨 Генератор идеальных вайфу: @MyNekoBaka89_bot\n"
                         f"💻 Шира-тян — твоя ИИ-ассистентка: @shira_neuro_bot"
                     )
-                    send_keyboard = get_payment_keyboard()
+                    send_keyboard = get_no_energy_keyboard()
                     await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
 
@@ -930,11 +957,19 @@ async def handle_update(
                 answer = "Сначала выбери персонажа, с которым хочешь пообщаться! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                target_model = settings.model
-                balance = await payment_repo.get_user_balance(user["id"])
+                # 🔥 ПЕРЕОПРЕДЕЛЕНИЕ МОДЕЛИ ДЛЯ ПОДДЕРЖКИ
+                is_support_char = current_char.get("is_support", False)
+                if is_support_char:
+                    # Используем модель поддержки из конфига (или фоллбек на mistral-nemo)
+                    active_model = getattr(settings, 'support_model', 'mistralai/mistral-nemo')
+                else:
+                    active_model = user.get("preferred_model") or settings.model
 
+                balance = await payment_repo.get_user_balance(user["id"])
                 is_admin = get_settings().is_admin(int(from_id))
-                if balance <= 0 and not is_admin:
+
+                # 🔥 ПРОВЕРКА БАЛАНСА: Поддержка бесплатна, для остальных нужна энергия
+                if not is_support_char and balance <= 0 and not is_admin:
                     char_name = current_char["name"]
                     answer = (
                         f"😿 {char_name} устала и ей нужно отдохнуть!\n\n"
@@ -943,13 +978,13 @@ async def handle_update(
                         f"🎨 Генератор идеальных вайфу: @MyNekoBaka89_bot\n"
                         f"💻 Шира-тян — твоя ИИ-ассистентка: @shira_neuro_bot"
                     )
-                    send_keyboard = get_payment_keyboard()
+                    send_keyboard = get_no_energy_keyboard()
                     await api.send_message(peer_id=int(peer_id), text=answer, keyboard=send_keyboard)
                     return
 
                 char_id = current_char["id"]
                 await msg_repo.add_message(user["id"], char_id, "user", text)
-                active_model = user.get("preferred_model") or target_model
+
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=char_id,
@@ -958,7 +993,7 @@ async def handle_update(
                     user_dict=user,
                     char_dict=current_char,
                     keyboard=get_regenerate_inline_keyboard(),
-                    model_name=active_model,
+                    model_name=active_model,  # 🔥 Передаем переопределенную модель
                     photo_url=photo_url
                 ))
                 return

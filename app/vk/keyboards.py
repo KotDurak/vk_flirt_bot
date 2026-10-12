@@ -1,45 +1,60 @@
 from app.vk.keyboard import KeyboardBuilder
 import json
 
+
 def get_main_menu_keyboard() -> str:
-    """Главное меню бота."""
+    """Главное меню бота (оптимизировано в 2 колонки)."""
     kb = KeyboardBuilder(one_time=False)
 
-    # Основные действия
-    kb.add_button("👤 Выбрать персонажа", payload={"cmd": "chars"}, color="primary")
-    kb.row()
+    # Основные действия (2 в ряд)
+    kb.add_button("👤 Персонажи", payload={"cmd": "chars"}, color="primary")
     kb.add_button("⚡ Купить энергию", payload={"cmd": "buy"}, color="positive")
     kb.row()
 
-    # Второстепенные действия
+    # Второстепенные действия (2 в ряд)
     kb.add_button("📊 Мой профиль", payload={"cmd": "profile"}, color="secondary")
     kb.add_button("🎁 Ввести промокод", payload={"cmd": "promo"}, color="secondary")
     kb.row()
 
-    #  НОВАЯ КНОПКА РЕФЕРАЛЬНОЙ СИСТЕМЫ
+    # 🔥 НОВЫЙ БЛОК: Ами + Рефералка (2 в ряд)
+    kb.add_button("💬 Ами (Поддержка)", payload={"cmd": "ami_support"}, color="secondary")
     kb.add_button("💸 Заработать энергию", payload={"cmd": "referral"}, color="secondary")
     kb.row()
 
-    # Служебные действия
+    # Служебные действия (2 в ряд)
     kb.add_button("ℹ️ Помощь", payload={"cmd": "help"}, color="secondary")
-    kb.add_button("🆘 Поддержка", payload={"cmd": "support"}, color="secondary")
+    kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
     kb.row()
 
-    # Опасное действие
-    kb.add_button("🔄 Сбросить диалог", payload={"cmd": "reset"}, color="negative")
+    # Отдельная кнопка для создания тикета (чтобы не путать с болталкой с Ами)
+    kb.add_button("🆘 Сообщить о проблеме", payload={"cmd": "support"}, color="secondary")
+    kb.row()
 
-    # === ДОБАВЛЕНИЕ: Кнопка-ссылка на Mini App (каталог персонажей) ===
+    # === Кнопка-ссылка на Mini App (каталог персонажей) ===
     keyboard_json = json.loads(kb.to_json())
     keyboard_json["buttons"].append([
         {
             "action": {
                 "type": "open_link",
                 "link": "https://vk.ru/app54816075",
-                "label": " Открыть каталог персонажей"
+                "label": "🎭 Открыть каталог с фильтрами"
             }
         }
     ])
     return json.dumps(keyboard_json)
+
+
+def get_no_energy_keyboard() -> str:
+    """🔥 НОВАЯ ФУНКЦИЯ: Клавиатура, когда у пользователя закончилась энергия."""
+    kb = KeyboardBuilder(one_time=False, inline=True)  # inline выглядит аккуратнее под сообщением
+
+    kb.add_button("⚡ Купить энергию", payload={"cmd": "buy"}, color="positive")
+    kb.row()
+    kb.add_button("💬 Поговорить с Ами (бесплатно)", payload={"cmd": "ami_support"}, color="secondary")
+    kb.row()
+    kb.add_button("🎁 Ввести промокод", payload={"cmd": "promo"}, color="secondary")
+
+    return kb.to_json()
 
 
 def get_admin_promo_list_keyboard(page: int, total_pages: int) -> str:
@@ -55,6 +70,7 @@ def get_admin_promo_list_keyboard(page: int, total_pages: int) -> str:
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
+
 def get_dialog_keyboard() -> str:
     """Клавиатура во время активного диалога (нижняя панель)."""
     kb = KeyboardBuilder(one_time=False)
@@ -67,7 +83,7 @@ def get_regenerate_inline_keyboard() -> str:
     kb = KeyboardBuilder(one_time=False, inline=True)
 
     kb.add_button("🔄 Перегенерировать (-1 ⚡)", payload={"cmd": "regenerate"}, color="secondary")
-    kb.row()  # 🔥 Принудительный перенос на новую строку
+    kb.row()
     kb.add_button("🎨 Нарисовать (15 ⚡)", payload={"cmd": "generate_image"}, color="primary")
 
     return kb.to_json()
@@ -83,11 +99,9 @@ def get_characters_keyboard(characters: list[dict], per_row: int = 2) -> str:
             payload={"cmd": "select_char", "char_id": char["id"]},
             color="primary"
         )
-        # Переходим на новый ряд после каждых per_row кнопок
         if (i + 1) % per_row == 0:
             kb.row()
 
-    # Перед кнопкой "В главное меню" всегда делаем новый ряд
     kb.row()
     kb.add_button("⬅️ В главное меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
@@ -95,11 +109,9 @@ def get_characters_keyboard(characters: list[dict], per_row: int = 2) -> str:
 
 def get_characters_paginated_keyboard(characters: list[dict], page: int, total_pages: int, per_row: int = 2) -> str:
     """Создает инлайн-клавиатуру со списком персонажей с пагинацией."""
-    # Используем inline=True, чтобы клавиатура не перекрывала поле ввода и выглядела аккуратно
     kb = KeyboardBuilder(one_time=False, inline=True)
 
     for i, char in enumerate(characters):
-        # Обрезаем имя, чтобы оно гарантированно влезло в кнопку VK (макс ~40 символов, лучше меньше)
         label = char["name"][:22] + "..." if len(char["name"]) > 22 else char["name"]
         kb.add_button(
             label=label,
@@ -109,19 +121,15 @@ def get_characters_paginated_keyboard(characters: list[dict], page: int, total_p
         if (i + 1) % per_row == 0:
             kb.row()
 
-    # Ряд навигации по страницам
     kb.row()
     if page > 1:
         kb.add_button("⬅️ Назад", payload={"cmd": "chars", "page": page - 1}, color="secondary")
-
     if page < total_pages:
         kb.add_button("Вперед ➡️", payload={"cmd": "chars", "page": page + 1}, color="secondary")
 
-    # Ряд с выходом в главное меню
     kb.row()
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
 
-    # === ДОБАВЛЕНИЕ: Кнопка-ссылка на Mini App (каталог с фильтрами) ===
     keyboard_json = json.loads(kb.to_json())
     keyboard_json["buttons"].append([
         {
@@ -168,7 +176,7 @@ def get_payment_action_keyboard(payment_url: str, invoice_id: str) -> str:
                 {
                     "action": {
                         "type": "open_link",
-                        "link": payment_url,  # Сюда передаем short_url или обычную ссылку
+                        "link": payment_url,
                         "label": "💳 Оплатить"
                     }
                 }
@@ -212,22 +220,18 @@ def get_check_payment_keyboard(invoice_id: str) -> str:
 
 
 def get_admin_ticket_list_keyboard(tickets: list[dict], page: int, total_pages: int) -> str:
-    """Клавиатура списка тикетов - только просмотр, закрытие внутри тикета."""
+    """Клавиатура списка тикетов."""
     kb = KeyboardBuilder(one_time=False, inline=True)
 
-    # Кнопки просмотра (по 2 в ряд для компактности)
     for i, t in enumerate(tickets):
         tid = t['id']
         kb.add_button(f"👁️ #{tid}", payload={"cmd": "admin_ticket_view", "id": tid}, color="primary")
-        # Переход на новый ряд после каждых 2 кнопок
         if (i + 1) % 2 == 0:
             kb.row()
 
-    # Если последний ряд неполный - завершаем его
     if len(tickets) % 2 != 0:
         kb.row()
 
-    # Навигация по страницам
     if page > 1 or page < total_pages:
         if page > 1:
             kb.add_button("⬅️", payload={"cmd": "admin_tickets", "page": page - 1}, color="secondary")
@@ -235,7 +239,7 @@ def get_admin_ticket_list_keyboard(tickets: list[dict], page: int, total_pages: 
             kb.add_button("➡️", payload={"cmd": "admin_tickets", "page": page + 1}, color="secondary")
         kb.row()
 
-    kb.add_button(" В меню", payload={"cmd": "start"}, color="secondary")
+    kb.add_button("🏠 В меню", payload={"cmd": "start"}, color="secondary")
     return kb.to_json()
 
 
@@ -243,12 +247,10 @@ def get_admin_ticket_actions_keyboard(ticket_id: int, page: int = 1) -> str:
     """Кнопки действий для конкретного тикета."""
     kb = KeyboardBuilder(one_time=False, inline=True)
 
-    # Кнопки действий с тикетом
     kb.add_button("👁️ Просмотреть детали", payload={"cmd": "admin_ticket_view", "id": ticket_id}, color="primary")
     kb.add_button("✅ Закрыть тикет", payload={"cmd": "admin_ticket_resolve", "id": ticket_id}, color="positive")
 
     kb.row()
-    # Навигация
     kb.add_button("⬅️ К списку", payload={"cmd": "admin_tickets", "page": page}, color="secondary")
     kb.add_button("🏠 В главное меню", payload={"cmd": "start"}, color="secondary")
 
@@ -259,7 +261,6 @@ def get_referral_keyboard(referral_code: str) -> str:
     """Клавиатура для шеринга реферального кода."""
     kb = KeyboardBuilder(one_time=False, inline=True)
 
-    # Кнопка, которая попросит бота продублировать код текстом для удобного копирования
     kb.add_button(
         label=f"📋 Скопировать код: {referral_code}",
         payload={"cmd": "copy_referral", "code": referral_code},

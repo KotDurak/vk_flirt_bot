@@ -217,5 +217,10 @@ async def run_migrations(db: Database) -> None:
            ON user_generations(user_id, attempted_at DESC);
        """)
 
+    await _add_column_if_not_exists(
+        conn, "characters", "is_support",
+        "BOOLEAN DEFAULT FALSE"
+    )
+
     await conn.commit()
     logger.info("Migrations completed successfully. Database is clean and ready.")

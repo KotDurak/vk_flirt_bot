@@ -9,6 +9,7 @@ import asyncio
 from app.vk.api import VKAPIError
 from app.db.connection import Database
 from app.config import get_settings
+from app.prompts.support import SUPPORT_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class CharacterRepository:
         filter_clause, params = self._get_active_filter()
 
         cursor = await conn.execute(
-            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support "
             f"FROM characters WHERE {filter_clause} ORDER BY position",
             params
         )
@@ -57,7 +58,7 @@ class CharacterRepository:
         query_params = params + [character_id]
 
         cursor = await conn.execute(
-            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support "
             f"FROM characters WHERE id = ? AND {filter_clause}",
             query_params
         )
@@ -82,7 +83,7 @@ class CharacterRepository:
         conn = self.db.connection
         cursor = await conn.execute(
             """
-            SELECT c.id, c.slug, c.name, c.description, c.photo_attachment, c.system_prompt, c.greeting_message
+            SELECT c.id, c.slug, c.name, c.description, c.photo_attachment, c.system_prompt, c.greeting_message, c.is_support
             FROM user_character uc
             JOIN characters c ON uc.character_id = c.id
             WHERE uc.user_id = ?
@@ -118,7 +119,7 @@ class CharacterRepository:
 
         cursor = await conn.execute(
             f"""
-            SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position 
+            SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support 
             FROM characters 
             WHERE {filter_clause} 
             ORDER BY position 
@@ -135,7 +136,7 @@ class CharacterRepository:
         query_params = params + [slug.lower()]
 
         cursor = await conn.execute(
-            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position "
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support "
             f"FROM characters WHERE slug = ? AND {filter_clause}",
             query_params
         )
@@ -220,6 +221,14 @@ CHARACTER_SEED = [
             CHARACTER_GOAL="Создавать легкую, позитивную атмосферу. Подбадривать собеседника, шутить, использовать спортивные метафоры для описания жизненных ситуаций (например, сравнивать лень с 'днем отдыха'). Искренне интересоваться делами пользователя, поддерживать любой.topic разговора, проявлять эмпатию и дружелюбие."
         ),
         "position": 1
+    },
+    {
+        "slug": "support_ami",
+        "name": "Ами (Поддержка) 🛠️",
+        "description": "Милая помощница, которая ответит на ваши вопросы о боте.",
+        "greeting_message": "Привет! 🐾 Я Ами, помощница администратора. Чем могу помочь?",
+        "is_support": True,
+        "position": 99
     },
     {
         "slug": "nuri",
@@ -345,6 +354,14 @@ async def seed_characters(db: Database) -> None:
     logger.info(f"📂 Итоговый список для сидирования: {len(characters_to_seed)} персонажей")
 
     for char in characters_to_seed:
+        # 🔥 ОПРЕДЕЛЯЕМ ПРОМПТ И ПРИВЕТСТВИЕ В ЗАВИСИМОСТИ ОТ РОЛИ
+        if char.get("is_support"):
+            target_system_prompt = SUPPORT_SYSTEM_PROMPT
+            target_greeting = char.get("greeting_message", "Привет! 🐾 Я Ами, помощница администратора. Чем могу помочь?")
+        else:
+            target_system_prompt = char["system_prompt"]
+            target_greeting = char.get("greeting_message", "")
+
         cursor = await conn.execute(
             "SELECT id FROM characters WHERE slug = ?",
             (char["slug"],)
@@ -352,24 +369,40 @@ async def seed_characters(db: Database) -> None:
         existing = await cursor.fetchone()
 
         if existing:
+            # 🔥 ДОБАВИЛИ is_support В UPDATE
             await conn.execute(
                 """
                 UPDATE characters
-                SET name = ?, description = ?, system_prompt = ?, greeting_message = ?, position = ?, is_active = TRUE
+                SET name = ?, description = ?, system_prompt = ?, greeting_message = ?, position = ?, is_active = TRUE, is_support = ?
                 WHERE id = ?
                 """,
-                (char["name"], char["description"], char["system_prompt"], char.get("greeting_message", ""),
-                 char["position"], existing["id"])
+                (
+                    char["name"],
+                    char.get("description", ""),
+                    target_system_prompt,
+                    target_greeting,
+                    char["position"],
+                    char.get("is_support", False),  # <-- ВОТ ОНО
+                    existing["id"]
+                )
             )
             logger.info("🔄 Updated character: %s", char["slug"])
         else:
+            # 🔥 ДОБАВИЛИ is_support В INSERT
             await conn.execute(
                 """
-                INSERT INTO characters (slug, name, description, system_prompt, greeting_message, position)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO characters (slug, name, description, system_prompt, greeting_message, position, is_support)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (char["slug"], char["name"], char["description"], char["system_prompt"],
-                 char.get("greeting_message", ""), char["position"])
+                (
+                    char["slug"],
+                    char["name"],
+                    char.get("description", ""),
+                    target_system_prompt,
+                    target_greeting,
+                    char["position"],
+                    char.get("is_support", False)  # <-- ВОТ ОНО
+                )
             )
             logger.info("➕ Inserted character: %s", char["slug"])
 

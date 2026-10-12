@@ -66,6 +66,7 @@ class LLMSettings(BaseSettings):
     polza_model: str = "deepseek/deepseek-v3.2"
 
     image_model: str = "bytedance-seed/seedream-5-0-flash"
+    support_model: str = "mistralai/mistral-nemo"
 
     max_tokens: int = 800
     temperature: float = 0.85  # 🔥 Безопасный баланс креатива и контроля
