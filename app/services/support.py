@@ -36,10 +36,10 @@ async def process_support_request(
     # 2. Сохраняем в БД через переданный репозиторий
     await support_repo.create_ticket(user_id, vk_user_id, text, attachment_url)
 
-    # 3. Уведомляем админа (БЕЗ HTML ТЕГОВ!)
+    # 3. Уведомляем админа (ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ: добавлена прямая ссылка вместо простого ID)
     admin_msg = (
         f"🆘 Новое обращение в поддержку!\n\n"
-        f"VK ID: {vk_user_id}\n"
+        f"VK ID: https://vk.com/im?sel={vk_user_id}\n"
         f"Текст: {text or 'Без текста, только скриншот'}\n"
     )
 

@@ -199,6 +199,7 @@ async def handle_update(
             "Поделись кодом! Когда друг введет его и напишет мне, он получит 10 энергии, а ты — 5 в качестве благодарности за рекомендацию."
         )
         send_keyboard = get_referral_keyboard(referral_code)
+
     elif cmd == "ami_support":
         # 🔥 ПЕРЕХОД К АМИ (ПОДДЕРЖКА)
         ami_char = await char_repo.get_by_slug("support_ami")
@@ -326,24 +327,26 @@ async def handle_update(
             answer = "🔄 Вся история сброшена! Начнем всё с чистого листа? 😉"
         send_keyboard = get_main_menu_keyboard()
 
-    # === ПОДДЕРЖКА ===
-    elif text_lower.startswith("/support") or cmd == "support":
-        if text_lower in ("поддержка", "support", "🆘 поддержка", "🆘 support", "/support", "🆘"):
-            support_text = ""
-        else:
-            parts = text.split(maxsplit=1)
-            support_text = parts[1].strip() if len(parts) > 1 else ""
-
+    # === ПОДДЕРЖКА (ИСПРАВЛЕНО) ===
+    elif text_lower.startswith("/support") or cmd == "support" or text_lower in ("поддержка", "support", "🆘 поддержка",
+                                                                                 "🆘 support", "/support", "🆘",
+                                                                                 "сообщить о проблеме",
+                                                                                 "🆘 сообщить о проблеме"):
         attachments = message.get("attachments", [])
 
-        if not support_text and not attachments:
+        # Проверяем, является ли это просто нажатием кнопки (без реального текста жалобы и без вложений)
+        is_just_button = (not text.strip()) or text_lower in ("поддержка", "support", "🆘 поддержка", "🆘 support",
+                                                              "/support", "🆘", "сообщить о проблеме",
+                                                              "🆘 сообщить о проблеме")
+
+        if is_just_button and not attachments:
             awaiting_support[int(from_id)] = time.time()
             answer = (
                 "🆘 Служба поддержки\n\n"
                 "Пожалуйста, опиши суть проблемы и прикрепи скриншот (если есть).\n\n"
                 "💡 *Как отправить:*\n"
                 "Просто напиши текст жалобы и прикрепи фото к этому сообщению. "
-                "Если ты просто нажал кнопку — напиши суть проблемы следующим сообщением (можно просто отправить скриншот)."
+                "Если ты просто нажал кнопку — отправь скриншот или текст проблемы следующим сообщением."
             )
             send_keyboard = get_main_menu_keyboard()
         else:
@@ -352,11 +355,13 @@ async def handle_update(
                 api=api,
                 user_id=user["id"],
                 vk_user_id=int(from_id),
-                text=support_text,
+                text=text,
                 attachments=attachments,
                 support_repo=support_repo
             )
             send_keyboard = get_main_menu_keyboard()
+            # Сбрасываем флаг, чтобы следующие сообщения шли персонажу
+            awaiting_support.pop(int(from_id), None)
 
     # === ПОКУПКА ЭНЕРГИИ ===
     elif cmd == "buy":
@@ -598,8 +603,7 @@ async def handle_update(
                 else:
                     answer = f"📋 Активные промокоды (Стр. {page} из {total_pages}):\n\n"
                     for p in promos:
-                        limit = f"{p['current_uses']}/{p['max_uses']}" if p[
-                                                                              'max_uses'] is not None else f"{p['current_uses']}/∞"
+                        limit = f"{p['current_uses']}/{p['max_uses']}" if p['max_uses'] is not None else f"{p['current_uses']}/∞"
                         answer += f"🔹 `{p['code']}` | Награда: {p['reward']} | Использовано: {limit}\n"
                     answer += "\n Чтобы создать новый: `/admin_promo_add КОД НАГРАДА [ЛИМИТ]`"
                     send_keyboard = get_admin_promo_list_keyboard(page, total_pages)
@@ -655,6 +659,7 @@ async def handle_update(
                             f"🎫 Детали тикета #{ticket['id']} ({status_emoji})\n\n"
                             f"👤 Внутренний ID: {ticket['user_id']}\n"
                             f"🆔 VK ID: {ticket['vk_user_id']}\n"
+                            f"🔗 Диалог: https://vk.com/im?sel={ticket['vk_user_id']}\n"
                             f"🕒 Дата: {ticket['created_at']}\n\n"
                             f"💬 Текст обращения:\n{ticket['text'] or 'Без текста'}\n\n"
                         )
@@ -758,7 +763,6 @@ async def handle_update(
             answer = "Сначала выбери персонажа, чью магию ты хочешь увидеть! 👇"
             send_keyboard = get_main_menu_keyboard()
         else:
-            # 🔥 ДОБАВЬ ПРОВЕРКУ БАЛАНСА ЗДЕСЬ
             balance = await payment_repo.get_user_balance(user["id"])
             is_admin = get_settings().is_admin(int(from_id))
 
@@ -766,7 +770,6 @@ async def handle_update(
                 answer = f"😿 У тебя не хватает энергии! Нужно 15 , а у тебя {balance}. Пополни баланс!"
                 send_keyboard = get_payment_keyboard()
             else:
-                # Только если баланс достаточный — добавляем в очередь
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=current_char["id"],
@@ -777,7 +780,7 @@ async def handle_update(
                     keyboard=get_regenerate_inline_keyboard(),
                     is_image_generation=True
                 ))
-                return  # 🔥 ВАЖНО: не отправляем answer в конце функции
+                return
 
     elif cmd == "copy_referral":
         code = payload.get("code", "")
@@ -957,10 +960,8 @@ async def handle_update(
                 answer = "Сначала выбери персонажа, с которым хочешь пообщаться! 👇"
                 send_keyboard = get_main_menu_keyboard()
             else:
-                # 🔥 ПЕРЕОПРЕДЕЛЕНИЕ МОДЕЛИ ДЛЯ ПОДДЕРЖКИ
                 is_support_char = current_char.get("is_support", False)
                 if is_support_char:
-                    # Используем модель поддержки из конфига (или фоллбек на mistral-nemo)
                     active_model = getattr(settings, 'support_model', 'mistralai/mistral-nemo')
                 else:
                     active_model = user.get("preferred_model") or settings.model
@@ -968,7 +969,6 @@ async def handle_update(
                 balance = await payment_repo.get_user_balance(user["id"])
                 is_admin = get_settings().is_admin(int(from_id))
 
-                # 🔥 ПРОВЕРКА БАЛАНСА: Поддержка бесплатна, для остальных нужна энергия
                 if not is_support_char and balance <= 0 and not is_admin:
                     char_name = current_char["name"]
                     answer = (
@@ -993,7 +993,7 @@ async def handle_update(
                     user_dict=user,
                     char_dict=current_char,
                     keyboard=get_regenerate_inline_keyboard(),
-                    model_name=active_model,  # 🔥 Передаем переопределенную модель
+                    model_name=active_model,
                     photo_url=photo_url
                 ))
                 return
