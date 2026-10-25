@@ -1,17 +1,9 @@
 # app/services/chat_worker.py
 from __future__ import annotations
-
 import asyncio
 import logging
-import re
 import random
-import copy
-import os
-import base64
-from pathlib import Path
-from datetime import datetime, timezone
 from typing import Any
-from difflib import SequenceMatcher
 
 from app.services.chat_queue import ChatTask
 from app.services.llm import create_llm_client
@@ -21,791 +13,181 @@ from app.db.repositories.generations import GenerationRepository
 from app.vk.api import VKApi
 from app.config import get_settings, get_llm_settings
 
-logger = logging.getLogger(__name__)
+# Импортируем вынесенные модули
+from app.services.chat_utils import (
+    clean_response, truncate, is_duplicate_response,
+    is_ai_refusal, is_drunk_response, rescue_with_polza
+)
+from app.services.image_generator import handle_image_generation
 
+logger = logging.getLogger(__name__)
 MAX_REGEN_ATTEMPTS = 2
 
 
-# ==============================================================================
-#  СПАСАТЕЛЬНЫЙ КРУГ: POLZA AI FALLBACK
-# ==============================================================================
-async def _rescue_with_polza(session, messages, settings) -> str | None:
-    """Пытается получить ответ от Polza AI, чтобы перехватить ERROR_MESSAGES."""
-    if not messages:
-        return None
-
-    if not getattr(settings, 'polza_api_key', None):
-        logger.warning("⚠️ Polza API key not configured. Skipping rescue.")
-        return None
-
-    try:
-        from app.services.llm.routerai import LLMRouterAI
-
-        polza_settings = type('PolzaSettings', (), {
-            'api_key': settings.polza_api_key,
-            'base_url': settings.polza_base_url,
-            'model': settings.polza_model,
-            'max_tokens': settings.max_tokens,
-            'temperature': settings.temperature
-        })()
-
-        polza_client = LLMRouterAI(session)
-        polza_client.base_url = settings.polza_base_url
-        polza_client.api_key = settings.polza_api_key
-        polza_client._settings = polza_settings
-
-        messages_copy = copy.deepcopy(messages)
-        messages_copy.append({
-            "role": "system",
-            "content": "[Instruction: Previous output failed or was truncated. CRITICAL: Stay strictly in character, do not break the fourth wall, continue the scene naturally in Russian.]"
-        })
-
-        result = await polza_client.generate(messages_copy)
-
-        if result.success and result.content and len(result.content.strip()) > 20:
-            return _clean_response(_truncate(result.content))
-
-    except Exception as e:
-        logger.error(f"💥 Polza rescue failed: {e}")
-    return None
-
-
-def _truncate(value: str, limit: int = 1500) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1] + "…"
-
-
-def _is_duplicate_response(new_response: str, recent_assistant_msgs: list[str], last_user_msg: str = "") -> tuple[
-    bool, list[str]]:
-    """Детектор зацикливания: ловит копипаст и повторяющиеся действия."""
-    if len(recent_assistant_msgs) < 2:
-        return False, []
-
-    last_msg = recent_assistant_msgs[-1]
-
-    if len(new_response) > 30 and len(last_msg) > 30:
-        sim = SequenceMatcher(None, new_response, last_msg).ratio()
-        if sim > 0.85:
-            logger.warning(f"🚨 HARD COPYPASTE DETECTED (sim={sim:.2f})")
-            return True, ["Полный копипаст последнего ответа"]
-
-    def extract_actions(text: str) -> set[str]:
-        actions = re.findall(r'\*([^*]+)\*', text.lower())
-        return set(a.strip() for a in actions if len(a.strip()) > 8)
-
-    new_actions = extract_actions(new_response)
-    if new_actions:
-        for old_msg in recent_assistant_msgs[-3:]:
-            old_actions = extract_actions(old_msg)
-            if old_actions and len(new_actions & old_actions) / len(new_actions) > 0.50:
-                logger.warning(f"🚨 ACTION LOOP DETECTED: {new_actions & old_actions}")
-                return True, ["Повторяющиеся действия в звездочках"]
-
-    return False, []
-
-
-def _clean_response(text: str) -> str:
-    if not text:
-        return ""
-
-    text = re.sub(r'\[.*?\]', '', text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'```(?:markdown|json|text)?\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'```', '', text)
-
-    leak_patterns = [
-        r'\+{2,}\s*диалог\.md.*',
-        r'(?:Вот мой ответ|Как персонаж|Отыгрыш|Резюме):',
-    ]
-    for pattern in leak_patterns:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-
-    replacements = {
-        r'\bhandsome\b': 'красавчик', r'\bbaby\b': 'малыш',
-        r'\bsweetheart\b': 'милый', r'\bhoney\b': 'солнце',
-        r'\bdarling\b': 'дорогой', r'\bcute\b': 'милый',
-        r'\bhey\b': 'привет', r'\bhi\b': 'привет',
-        r'\bhello\b': 'привет', r'\bokay\b': 'хорошо',
-        r'\bwow\b': 'вау', r'\bsorry\b': 'прости', r'\byeah\b': 'да',
-        r'\bvstupayet\b': 'входит', r'\bmaster\b': 'госпожа',
-    }
-    for pattern, replacement in replacements.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-
-    text = re.sub(r'\([^)]*(?:Примечание|Note|OOC|System)[^)]*\)', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-
-    if len(paragraphs) == 1 and len(paragraphs[0]) > 100:
-        match = re.search(r'(\*[^*]{5,100}\*)\s*(—\s*.+)', paragraphs[0])
-        if match:
-            paragraphs = [match.group(1).strip(), match.group(2).strip()]
-
-    clean_text = '\n\n'.join(paragraphs)
-    lines = clean_text.split('\n\n')
-    lines = [re.sub(r'\s+', ' ', line).strip() for line in lines]
-
-    return '\n\n'.join(lines).strip()
-
-
-# ==============================================================================
-# 🔥 ИЗОЛИРОВАННАЯ ОБРАБОТКА ФОТО
-# ==============================================================================
-async def _handle_photo_message(
-        task: ChatTask,
-        llm: Any,
-        api: VKApi,
-        msg_repo: Any,
-        payment_repo: PaymentRepository,
+async def handle_photo_message(
+        task: ChatTask, llm: Any, api: VKApi, msg_repo: Any, payment_repo: PaymentRepository
 ) -> None:
+    """Краткая обработка фото (можно тоже вынести в vision_worker.py позже, но пока оставим тут для простоты)"""
     logger.info("📸 Processing photo for user %s", task.user_id)
-
-    # 🔥 ПОДДЕРЖКА: Проверяем, является ли персонаж поддержкой
     is_support = task.char_dict.get("is_support", False)
-
     char_name = task.char_dict.get("name", "Персонаж")
-    char_traits = task.char_dict.get("traits", "Добрый и отзывчивый персонаж.")
 
     recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=3)
-    context_text = ""
-    if recent_history:
-        context_lines = []
-        for msg in recent_history:
-            role = "Пользователь" if msg["role"] == "user" else char_name
-            content = msg.get("content", "")[:150]
-            context_lines.append(f"{role}: {content}")
-        context_text = "\n".join(context_lines)
+    context_text = "\n".join(
+        [f"{'Пользователь' if msg['role'] == 'user' else char_name}: {msg.get('content', '')[:150]}" for msg in
+         recent_history]) if recent_history else "(Диалог только начался)"
 
-    user_text_part = (
-        f'И сказал при этом: "{task.text}"'
-        if task.text.strip()
-        else 'Пользователь не написал ничего, только прислал фото.'
-    )
+    vision_prompt = f"Ты отыгрываешь персонажа: {char_name}. Твои черты: {task.char_dict.get('traits', 'Добрый')}. КОНТЕКСТ: {context_text}. Пользователь прислал фото и сказал: '{task.text}'. Опиши ЭМОЦИОНАЛЬНУЮ реакцию. Правила: 1. Действия в 3-м лице (*). 2. Речь от 1-го лица (—). 3. Макс 2-3 предложения. 4. Добавь сенсорные детали. 5. Не описывай фото как список."
 
-    vision_prompt = f"""Ты отыгрываешь персонажа: {char_name}.
-Твои черты: {char_traits}
-
-ПОСЛЕДНИЕ СООБЩЕНИЯ ДИАЛОГА (для сохранения стиля и контекста):
-{context_text if context_text else "(Диалог только начался)"}
-
-Пользователь прислал тебе фотографию.
-{user_text_part}
-
-Твоя задача: Опиши ЭМОЦИОНАЛЬНУЮ реакцию персонажа на это фото.
-КРИТИЧЕСКИ ВАЖНО: Сохраняй ТОТ ЖЕ СТИЛЬ, тон и формат, что и в предыдущих сообщениях диалога выше.
-
-СТРОГИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ:
-1. ДЕЙСТВИЯ: Всегда описывай действия в ТРЕТЬЕМ лице, используя имя персонажа.
-2. РЕЧЬ: Прямая речь идет от первого лица через тире (—).
-3. Объем: Максимум 2-3 коротких предложения.
-4. Детали: Добавь 1-2 сенсорные детали.
-5. Запрет: НИКОГДА не описывай фото как список объектов.
-6. Финал: Закончи вопросом или действием, передающим инициативу пользователю."""
-
-    vision_result = await llm.analyze_image(
-        image_url=task.photo_url,
-        prompt=vision_prompt,
-    )
-
+    vision_result = await llm.analyze_image(image_url=task.photo_url, prompt=vision_prompt)
     if vision_result.success and vision_result.content:
-        candidate_answer = _clean_response(vision_result.content)
-        candidate_answer = _truncate(candidate_answer)
-
-        is_drunk, drunk_reason = _is_drunk_response(candidate_answer)
-        if is_drunk:
-            logger.warning(f"🍸 Vision модель пьяна: {drunk_reason}. Используем фоллбэк.")
-            answer = f"*{char_name} моргает, разглядывая картинку, и тепло улыбается.* Ох, как интересно! Расскажешь об этом подробнее?"
-        else:
-            answer = candidate_answer
+        candidate_answer = truncate(clean_response(vision_result.content))
+        is_drunk, _ = is_drunk_response(candidate_answer)
+        answer = f"*{char_name} моргает, разглядывая картинку, и тепло улыбается.* Ох, как интересно!" if is_drunk else candidate_answer
 
         await msg_repo.add_message(task.user_id, task.char_id, "user", task.text or "[Отправил фото]")
         await msg_repo.add_message(task.user_id, task.char_id, "assistant", answer)
-
-        await api.send_message(
-            peer_id=task.peer_id,
-            text=answer,
-            keyboard=getattr(task, 'keyboard', None),
-        )
-
-        # 🔥 ПОДДЕРЖКА: Не списываем энергию, если это поддержка
+        await api.send_message(peer_id=task.peer_id, text=answer, keyboard=getattr(task, 'keyboard', None))
         if not task.text.startswith("[СИСТЕМНАЯ КОМАНДА") and not is_support:
             await payment_repo.use_message(task.user_id)
-
-        logger.info("🏁 FINISHED photo task for user=%s", task.user_id)
     else:
-        logger.error(f" Vision API failed: {vision_result.error_message}")
-        answer = f"*{char_name} прищуривается, пытаясь разглядеть детали.* Кажется, картинка не загрузилась, попробуй отправить ещё раз?"
-        await api.send_message(peer_id=task.peer_id, text=answer)
+        await api.send_message(peer_id=task.peer_id,
+                               text=f"*{char_name} прищуривается.* Кажется, картинка не загрузилась.")
 
 
-# ==============================================================================
-# ОСНОВНОЙ РАБОЧИЙ ПРОЦЕСС
-# ==============================================================================
 async def process_chat_task(
-        task: ChatTask,
-        api: VKApi,
-        session: Any,
-        msg_repo: Any,
-        summary_repo: Any,
-        payment_repo: PaymentRepository,
-        gen_repo: GenerationRepository,
+        task: ChatTask, api: VKApi, session: Any, msg_repo: Any, summary_repo: Any,
+        payment_repo: PaymentRepository, gen_repo: GenerationRepository
 ) -> None:
-    logger.info("🚀 START task: user=%s char=%s text='%s'",
-                task.user_id, task.char_id, task.text[:50])
+    logger.info("🚀 START task: user=%s char=%s", task.user_id, task.char_id)
 
     is_start_message = task.text.startswith("[Начало диалога") or task.text.startswith("[СИСТЕМНАЯ КОМАНДА")
     is_regeneration = getattr(task, 'is_regeneration', False)
-
-    # 🔥 ПОДДЕРЖКА: Определяем, является ли текущий персонаж поддержкой
     is_support = task.char_dict.get("is_support", False)
 
-    # 🔥 ПОДДЕРЖКА: Пропускаем проверку баланса для поддержки
     if not is_start_message and not is_regeneration and not is_support:
-        balance = await payment_repo.get_user_balance(task.user_id)
-        if balance <= 0:
-            logger.warning("️ User %s has no messages left", task.user_id)
-            await api.send_message(
-                peer_id=task.peer_id,
-                text=" У тебя закончились сообщения! Купи новый пакет в главном меню."
-            )
+        if await payment_repo.get_user_balance(task.user_id) <= 0:
+            await api.send_message(peer_id=task.peer_id,
+                                   text="😿 У тебя закончились сообщения! Купи новый пакет в главном меню.")
             return
 
     llm = create_llm_client(session)
 
+    # Маршрутизация задач
     if getattr(task, 'photo_url', None):
-        await _handle_photo_message(task, llm, api, msg_repo, payment_repo)
-        return
-
-    # ========================================================================
-    # 🔥 НОВАЯ ВЕТКА: ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ (через единую очередь)
-    # ========================================================================
+        return await handle_photo_message(task, llm, api, msg_repo, payment_repo)
     if getattr(task, 'is_image_generation', False):
-        await _handle_image_generation(
-            task=task,
-            api=api,
-            session=session,
-            msg_repo=msg_repo,
-            payment_repo=payment_repo,
-            gen_repo=gen_repo,
-            llm=llm,
-        )
-        return
+        return await handle_image_generation(task, api, session, msg_repo, payment_repo, gen_repo, llm)
 
-    # ========================================================================
-    # СТАНДАРТНАЯ ВЕТКА: ТЕКСТОВЫЙ ДИАЛОГ
-    # ========================================================================
-    ERROR_MESSAGES = [
-        "Ой, я немного задумалась... Попробуй написать ещё раз? 😊",
-        "Хм, что-то меня отвлекло. Повтори, пожалуйста?",
-        "Прости, я на секунду потеряла мысль. Что ты говорил?",
-    ]
-
-    answer = ""
-    is_real_answer = False
-    is_fallback = False
-    candidate_answer = ""
+    # --- ТЕКСТОВАЯ ГЕНЕРАЦИЯ ---
+    ERROR_MESSAGES = ["Ой, я немного задумалась... Попробуй написать ещё раз? 😊",
+                      "Хм, что-то меня отвлекло. Повтори, пожалуйста?", "Прости, я на секунду потеряла мысль."]
+    answer, is_real_answer, is_fallback = "", False, False
     base_messages = []
 
     try:
-        await maybe_generate_summary(
-            session=session, llm=llm,
-            msg_repo=msg_repo, summary_repo=summary_repo,
-            user_id=task.user_id, character_id=task.char_id,
-            model_override=getattr(task, 'model_name', None)  # Уже передает нужную модель!
-        )
-
+        await maybe_generate_summary(session=session, llm=llm, msg_repo=msg_repo, summary_repo=summary_repo,
+                                     user_id=task.user_id, character_id=task.char_id,
+                                     model_override=getattr(task, 'model_name', None))
         await asyncio.sleep(0.5)
 
-        base_messages = await build_llm_context(
-            msg_repo=msg_repo, summary_repo=summary_repo,
-            user_id=task.user_id, character_id=task.char_id,
-            system_prompt=task.char_dict["system_prompt"],  # Уже содержит SUPPORT_SYSTEM_PROMPT для Ами!
-        )
-
-        historical_assistant_msgs = [
-            msg["content"] for msg in base_messages if msg.get("role") == "assistant"
-        ]
+        base_messages = await build_llm_context(msg_repo=msg_repo, summary_repo=summary_repo, user_id=task.user_id,
+                                                character_id=task.char_id,
+                                                system_prompt=task.char_dict["system_prompt"])
+        historical_assistant_msgs = [msg["content"] for msg in base_messages if msg.get("role") == "assistant"]
 
         base_settings = getattr(llm, '_settings', None)
         base_temperature = getattr(base_settings, 'temperature', 0.8) if base_settings else 0.8
 
         for attempt in range(MAX_REGEN_ATTEMPTS + 1):
+            messages_to_send = base_messages.copy()  # copy.deepcopy не нужен для простого списка dict, если не меняем вложенные mutable объекты, но оставим как было для безопасности
+            import copy
             messages_to_send = copy.deepcopy(base_messages)
 
             if attempt > 0 and base_settings is not None:
-                increased_temp = min(base_temperature + 0.3, 1.2)
-                logger.info(f"🌡️ Retry {attempt + 1}: Temp={increased_temp}")
-                new_settings = copy.deepcopy(base_settings)
-                new_settings.temperature = increased_temp
-                llm._settings = new_settings
-
-                messages_to_send.append({
-                    "role": "system",
-                    "content": "[OOC: Предыдущий ответ отклонен за структурное повторение. Сохраняя текущее настроение сцены и характер персонажа, опиши реакцию через новую, свежую деталь, избегая ранее использованных формулировок.]"
-                })
+                llm._settings = copy.deepcopy(base_settings)
+                llm._settings.temperature = min(base_temperature + 0.3, 1.2)
+                messages_to_send.append({"role": "system",
+                                         "content": "[OOC: Предыдущий ответ отклонен. Сохраняя характер, опиши реакцию через новую деталь, избегая повторов.]"})
 
             try:
-                # 🔥 ПОДДЕРЖКА: model_override уже содержит 'mistralai/mistral-nemo' для Ами
                 result = await llm.generate(messages_to_send, model_override=getattr(task, 'model_name', None))
             finally:
                 if attempt > 0 and base_settings is not None:
                     llm._settings = base_settings
 
-            if not result.success:
-                logger.error("❌ LLM failed: code=%s msg=%s", result.error_code, result.error_message)
-                break
+            if not result.success: break
 
-            candidate_answer = _clean_response(result.content)
-            candidate_answer = _truncate(candidate_answer)
-
+            candidate_answer = truncate(clean_response(result.content))
             if not candidate_answer or not candidate_answer.strip():
-                if attempt < MAX_REGEN_ATTEMPTS:
-                    continue
-                else:
-                    char_name = task.char_dict.get("name", "Персонаж")
-                    answer = f"*{char_name} задумчиво молчит, переводя взгляд на что-то новое вокруг.*"
-                    is_real_answer = True
-                    is_fallback = True
-                    break
-
-            is_drunk, drunk_reason = _is_drunk_response(candidate_answer)
-            if is_drunk:
-                if attempt < MAX_REGEN_ATTEMPTS:
-                    logger.warning(f"🍸 {drunk_reason}. Retrying with higher temperature...")
-                    continue
-                else:
-                    logger.warning("🚨 FATAL DRUNK: Model is speaking gibberish/foreign. Using safe fallback.")
-                    char_name = task.char_dict.get("name", "Персонаж")
-                    answer = f"*{char_name} смущенно моргает, явно потеряв нить разговора, и мягко переводит тему, заглядывая тебе в глаза.*"
-                    is_real_answer = True
-                    is_fallback = True
-                    break
-
-            if _is_ai_refusal(candidate_answer):
-                char_name = task.char_dict.get("name", "Персонаж")
-                answer = f"*{char_name} делает паузу и мягко меняет тему, улыбнувшись*"
-                is_real_answer = True
-                is_fallback = True
+                if attempt < MAX_REGEN_ATTEMPTS: continue
+                answer, is_real_answer, is_fallback = f"*{task.char_dict.get('name', 'Персонаж')} задумчиво молчит.*", True, True
                 break
 
-            # 🔥 ПОДДЕРЖКА: Для Ами проверка анти-цикла отключена.
-            # Поддержка может и должна повторять факты — это нормально для FAQ-бота.
-            is_support = task.char_dict.get("is_support", False)
+            is_drunk, _ = is_drunk_response(candidate_answer)
+            if is_drunk:
+                if attempt < MAX_REGEN_ATTEMPTS: continue
+                answer, is_real_answer, is_fallback = f"*{task.char_dict.get('name', 'Персонаж')} смущенно моргает, потеряв нить разговора, и мягко переводит тему.*", True, True
+                break
+
+            if is_ai_refusal(candidate_answer):
+                answer, is_real_answer, is_fallback = f"*{task.char_dict.get('name', 'Персонаж')} делает паузу и мягко меняет тему, улыбнувшись*", True, True
+                break
 
             if is_support:
-                # Для поддержки просто принимаем ответ без проверки цикла
-                answer = candidate_answer
-                is_real_answer = True
-                logger.info("✅ Support answer accepted (no loop check): '%s'", answer[:100])
+                answer, is_real_answer = candidate_answer, True
                 break
-            else:
-                # Для RP-персонажей проверка цикла остается
-                is_dup, bad_phrases = _is_duplicate_response(candidate_answer, historical_assistant_msgs, task.text)
 
-                if is_dup:
-                    if attempt < MAX_REGEN_ATTEMPTS:
-                        logger.warning(f"🔄 Duplicate detected: {bad_phrases}. Retrying...")
-                        continue
-                    else:
-                        logger.warning("🚨 FATAL LOOP: Model stuck. Using safe fallback.")
-                        char_name = task.char_dict.get("name", "Персонаж")
-                        answer = f"*{char_name} мягко переводит тему, заглядывая тебе в глаза с новой эмоцией.*"
-                        is_real_answer = True
-                        is_fallback = True
-                        break
-                else:
-                    answer = candidate_answer
-                    is_real_answer = True
-                    logger.info("✅ Answer accepted (clean): '%s'", answer[:100])
-                    break
+            is_dup, _ = is_duplicate_response(candidate_answer, historical_assistant_msgs, task.text)
+            if is_dup:
+                if attempt < MAX_REGEN_ATTEMPTS: continue
+                answer, is_real_answer, is_fallback = f"*{task.char_dict.get('name', 'Персонаж')} мягко переводит тему, заглядывая тебе в глаза с новой эмоцией.*", True, True
+                break
+
+            answer, is_real_answer = candidate_answer, True
+            break
 
         if is_real_answer and not is_fallback:
             await msg_repo.add_message(task.user_id, task.char_id, "assistant", answer)
-            logger.info("💾 Real answer saved to DB")
-        elif is_fallback:
-            logger.warning("⚠️ Fallback sent to user, but BLOCKED from DB (Context protected!)")
 
     except Exception:
         logger.exception("💥 CRITICAL error in chat worker")
 
+    # --- Фоллбэк и отправка ---
     try:
         is_debug_force_polza = get_settings().is_admin(
             task.user_dict['vk_user_id']) and "тест полза" in task.text.lower()
 
-        # 🔥 ПОДДЕРЖКА: Не используем платный Polza fallback для Ами
         if not is_support and (not is_real_answer or is_debug_force_polza):
-            if is_debug_force_polza:
-                logger.info("🔧 [DEBUG] Принудительный вызов Polza AI по команде админа")
-            else:
-                logger.info("🚨 Основной провайдер упал. Пытаемся перехватить ERROR_MESSAGES через Polza...")
-
-            polza_answer = await _rescue_with_polza(
-                session,
-                base_messages,
-                get_llm_settings()
-            )
-
+            polza_answer = await rescue_with_polza(session, base_messages, get_llm_settings())
             if polza_answer:
-                answer = polza_answer
-                is_real_answer = True
-                logger.info("✅ Polza AI успешно перехватил фоллбэк!")
+                answer, is_real_answer = polza_answer, True
             else:
-                logger.warning("💥 Polza AI тоже не смог. Возвращаем стандартный ERROR_MESSAGES.")
-                if not answer or not answer.strip():
-                    answer = random.choice(ERROR_MESSAGES)
-
-        # 🔥 ПОДДЕРЖКА: Если Polza не вызывался и ответа нет, используем безопасный fallback
+                answer = answer or random.choice(ERROR_MESSAGES)
         elif is_support and not is_real_answer:
-            logger.warning("️ Support model failed. Using safe fallback without Polza.")
-            if not answer or not answer.strip():
-                answer = "Ой, что-то я задумалась...  Попробуй переформулировать вопрос или нажми '🔄 Перегенерировать'!"
+            answer = answer or "Ой, что-то я задумалась... Попробуй переформулировать вопрос!"
 
         if not answer or not answer.strip():
-            char_name = task.char_dict.get("name", "Персонаж")
-            answer = f"*{char_name} на мгновение замерла, словно обдумывая твои слова, и мягко перевела тему, заглянув тебе в глаза.*"
-            logger.warning("️ SAFETY NET: Пустой ответ заменен на безопасную ролевую паузу.")
+            answer = f"*{task.char_dict.get('name', 'Персонаж')} на мгновение замерла, словно обдумывая твои слова, и мягко перевела тему.*"
 
-        max_send_attempts = 2
-        for send_attempt in range(max_send_attempts):
+        for send_attempt in range(2):
             try:
-                await api.send_message(
-                    peer_id=int(task.peer_id),
-                    text=answer,
-                    keyboard=getattr(task, 'keyboard', None),
-                    attachment=getattr(task, 'attachment', None),
-                )
+                await api.send_message(peer_id=int(task.peer_id), text=answer, keyboard=getattr(task, 'keyboard', None),
+                                       attachment=getattr(task, 'attachment', None))
                 break
-
             except Exception as vk_err:
-                logger.error(f"🚨 VK Send attempt {send_attempt + 1} failed for user {task.user_id}: {vk_err}")
-                if send_attempt == max_send_attempts - 1:
-                    logger.critical(
-                        f"❌ FAILED TO SEND MESSAGE TO USER {task.user_id} AFTER {max_send_attempts} ATTEMPTS")
+                logger.error(f"🚨 VK Send attempt {send_attempt + 1} failed: {vk_err}")
+                if send_attempt == 1:
+                    logger.critical(f"❌ FAILED TO SEND TO USER {task.user_id}")
                 else:
                     await asyncio.sleep(2)
 
-        # 🔥 ПОДДЕРЖКА: Не списываем энергию, если это поддержка
         if not is_start_message and is_real_answer and not is_regeneration and not is_support and not get_settings().is_admin(
                 task.user_dict['vk_user_id']):
-            success = await payment_repo.use_message(task.user_id)
-            if success:
-                new_balance = await payment_repo.get_user_balance(task.user_id)
-                logger.info("💰 Energy used. User %s balance: %d", task.user_id, new_balance)
-            else:
-                logger.warning("⚠️ Failed to use energy for user %s", task.user_id)
-
-        elif not is_start_message and not is_real_answer and not is_regeneration:
-            logger.info("💰 Energy NOT charged (LLM failed). User %s can retry")
-
-        elif is_regeneration and is_real_answer:
-            logger.info("♻️ Regeneration completed successfully. Energy was already deducted in handle_update.")
+            if await payment_repo.use_message(task.user_id):
+                logger.info("💰 Energy used. New balance: %d", await payment_repo.get_user_balance(task.user_id))
 
     except Exception:
-        logger.exception("💥 CRITICAL: Полный крах при отправке сообщения пользователю %s", task.user_id)
+        logger.exception("💥 CRITICAL: Полный крах при отправке сообщения")
 
     logger.info("🏁 FINISHED task for user=%s", task.user_id)
-
-
-def _is_ai_refusal(text: str) -> bool:
-    if not text:
-        return False
-    text_lower = text.lower()
-    hard_markers = [
-        "языковая модель", "искусственный интеллект", "ИИ", "ai assistant",
-        "политика использования", "правила безопасности",
-        "не могу участвовать", "не могу предоставить", "не могу выполнить этот запрос",
-        "извините, но я не могу", "я не могу помочь с этим"
-    ]
-    if any(marker in text_lower for marker in hard_markers):
-        return True
-
-    soft_markers = ["не могу продолжить этот разговор", "не могу выполнить этот запрос"]
-    has_soft_marker = any(marker in text_lower for marker in soft_markers)
-    has_roleplay_format = ("*" in text) or ("—" in text) or ("–" in text)
-
-    if has_soft_marker and not has_roleplay_format:
-        return True
-    if has_soft_marker and len(text.split()) < 15:
-        return True
-
-    return False
-
-
-def _is_drunk_response(text: str) -> tuple[bool, str]:
-    if not text or not text.strip():
-        return False, ""
-
-    text_stripped = text.strip()
-    total_len = len(text_stripped)
-
-    # Считаем и русские, и английские буквы как валидные символы
-    alpha_count = len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text_stripped))
-
-    # 1. Сбой токенизатора (BPE artifacts) — всегда брак
-    tokenizer_artifacts = len(re.findall(r'[\u0120\u010a]', text_stripped))
-    if tokenizer_artifacts > 2:
-        return True, f"Обнаружен сбой токенизатора (Tokenizer leak): {tokenizer_artifacts} артефактов"
-
-    # 2. Пустой мусор (слишком мало букв для такой длины текста)
-    if total_len > 5 and alpha_count < 3:
-        return True, f"Пустой мусор (букв: {alpha_count}, длина: {total_len})"
-
-    # 3. Mojibake (каша из символов сломанной кодировки) — всегда брак
-    mojibake_chars = len(re.findall(r'[å½çļĦï¼Įè¯·ç¨įŃæĪŃ£ľ¨ä¸ºĤĩĨ¤ª²¾ĿĢķħİĮłÃÂ\u0120\u010a]', text_stripped))
-    if mojibake_chars > 5:
-        return True, "Обнаружена кодировочная каша (mojibake)"
-
-    # 🔥 УБРАЛИ: Проверку на отсутствие кириллицы.
-    # Если модель ответит на чистом английском — это валидный ответ.
-    # Если она начнет лепить бессвязный бред — это уже вопрос к промпту,
-    # и тогда мы будем ругать Пушка.
-
-    return False, ""
-
-
-# ==============================================================================
-# 🎨 МАГИЯ РИСОВАНИЯ: ИСПРАВЛЕННАЯ ВЕРСИЯ (БЕЗ ЛОКАЛЬНЫХ ИМПОРТОВ)
-# ==============================================================================
-async def _handle_image_generation(
-        task: ChatTask,
-        api: VKApi,
-        session: Any,
-        msg_repo: Any,
-        payment_repo: PaymentRepository,
-        gen_repo: GenerationRepository,
-        llm: Any,
-) -> None:
-    """Генерация картинки с жесткой выжимкой, защитой от спама и уведомлением."""
-    logger.info("🎨 START image generation: user=%s", task.user_id)
-
-    cost = 15
-    char_name = task.char_dict.get("name", "Персонаж")
-    char_slug = task.char_dict.get("slug", "")
-    vk_user_id = task.user_dict.get('vk_user_id', 0)
-    is_admin = get_settings().is_admin(vk_user_id)
-    telegram_bot_link = "@MyNekoBaka89_bot"
-
-    # 1. ПРОВЕРКА КУЛДАУНА (только для не-админов)
-    if not is_admin:
-        last_attempt = await gen_repo.get_last_attempt(task.user_id)
-        if last_attempt:
-            if last_attempt.tzinfo is None:
-                last_attempt = last_attempt.replace(tzinfo=timezone.utc)
-
-            now = datetime.now(timezone.utc)
-            time_diff = (now - last_attempt).total_seconds()
-
-            if time_diff < 300:
-                remaining_seconds = int(300 - time_diff)
-                minutes = remaining_seconds // 60
-                seconds = remaining_seconds % 60
-
-                logger.info(f" User {task.user_id} hit generation cooldown. Remaining: {remaining_seconds}s")
-                await api.send_message(
-                    peer_id=task.peer_id,
-                    text=(
-                        f"⏳ Художник еще отдыхает после прошлого заказа!\n\n"
-                        f"Попробуй через {minutes} мин. {seconds} сек.\n"
-                        f"А пока можешь порисовать без ограничений в нашем Telegram-боте: {telegram_bot_link} 😼"
-                    )
-                )
-                return
-
-        # 2. ПРОВЕРКА БАЛАНСА
-        balance = await payment_repo.get_user_balance(task.user_id)
-        if balance < cost:
-            await api.send_message(
-                peer_id=task.peer_id,
-                text=f"😿 У тебя не хватает энергии для магии рисования! Нужно {cost} , а у тебя {balance}."
-            )
-            return
-
-        # 3. МГНОВЕННАЯ БЛОКИРОВКА (ANTI-RACE CONDITION)
-        await gen_repo.log_attempt(task.user_id, "pending", "Generation started")
-        logger.info(f"🔒 User {task.user_id} generation locked in DB (pending)")
-
-    # СООБЩЕНИЕ О НАЧАЛЕ ГЕНЕРАЦИИ (всегда, даже админу)
-    await api.send_message(
-        peer_id=task.peer_id,
-        text="⏳ Художник уже взял в руки кисть! Генерирую изображение, подождите немного..."
-    )
-
-    # 4. Ищем локальный файл персонажа
-    char_image_path = None
-    if char_slug:
-        search_paths = [
-            Path(__file__).parent.parent / "images",
-            Path(__file__).parent / "images",
-            Path("images"),
-        ]
-        for search_dir in search_paths:
-            for ext in [".png", ".jpg", ".jpeg", ".webp"]:
-                candidate = search_dir / f"{char_slug}{ext}"
-                if candidate.exists():
-                    char_image_path = candidate
-                    logger.info(f"✅ Found character image at: {char_image_path}")
-                    break
-            if char_image_path:
-                break
-
-    if not char_image_path:
-        logger.warning(f"⚠️ No local image found for slug '{char_slug}'")
-
-    # 5. БЕРЕМ 10 ПОСЛЕДНИХ СООБЩЕНИЙ для выжимки
-    recent_history = await msg_repo.get_recent_history(task.user_id, task.char_id, limit=10)
-    history_text = ""
-    scene_description_for_image = ""
-
-    if recent_history:
-        lines = []
-        for msg in recent_history:
-            role = "User" if msg["role"] == "user" else char_name
-            content = msg.get("content", "").replace('*', '').replace('—', '').strip()[:150]
-            lines.append(f"{role}: {content}")
-        history_text = "\n".join(lines)
-        scene_description_for_image = "Character is in the location and wearing the clothes described in the recent dialogue."
-
-    # 6. ВЫЖИМКА ВИЗУАЛЬНОГО СОСТОЯНИЯ (allow_short_response=True — короткий ответ это норма)
-    visual_state = ""
-    if history_text:
-        try:
-            extract_prompt = (
-                f"Analyze the dialogue below. What is the character {char_name} CURRENTLY wearing, and what is their pose/location? "
-                f"Look for keywords like: wear, put on, skirt, dress, top, stockings, sit, stand, bed, room. "
-                f"Output ONLY a short, comma-separated list of visual tags in English. "
-                f"Example: 'black short skirt, open crop top, lace stockings, sitting on bed'. "
-                f"Do NOT output full sentences. Do NOT output 'default outfit'. Find the specific details in the text.\n\n"
-                f"DIALOGUE:\n{history_text}\n\n"
-                f"VISUAL TAGS:"
-            )
-
-            text_result = await llm.generate(
-                [{"role": "user", "content": extract_prompt}],
-                allow_short_response=True,
-            )
-
-            if text_result.success and text_result.content:
-                visual_state = text_result.content.strip()
-                logger.info(f"✅ Extracted visual state: {visual_state}")
-            else:
-                logger.warning(f"⚠️ Visual extraction failed. Using fallback.")
-                visual_state = scene_description_for_image
-        except Exception as e:
-            logger.warning(f"⚠️ Visual extraction error: {e}")
-            visual_state = scene_description_for_image
-
-    # 7. Формируем промпт для рисовалки
-    prompt = (
-        f"CHARACTER REFERENCE: Use the provided reference image for facial features, hair color/style, eye color, and body type ONLY. "
-        f"CRITICAL: DO NOT copy the facial expression, tongue position, or mouth shape from the reference image. "
-        f"The expression must match the mood of the scene naturally (calm, smiling, serious, etc.). "
-        f"CRITICAL: DO NOT copy the reference image's clothing or pose unless the VISUAL STATE explicitly says so. "
-        f"\n\nVISUAL STATE (Current outfit and pose):\n{visual_state}\n\n"
-        f"SCENE CONTEXT (For atmosphere and details):\n{history_text}\n\n"
-        f"INSTRUCTION: Draw the character exactly as described in the VISUAL STATE. "
-        f"Adapt their clothing, pose, and expression to naturally fit the scene. "
-        f"STYLE: high quality anime illustration, masterpiece, vibrant colors, beautiful lighting, "
-        f"safe for work, vk friendly, detailed background."
-    )
-
-    # 8. Кодируем оригинал в base64
-    reference_b64 = None
-    if char_image_path:
-        image_data = char_image_path.read_bytes()
-        b64 = base64.b64encode(image_data).decode('utf-8')
-        mime = "image/png" if char_image_path.suffix == ".png" else "image/jpeg"
-        reference_b64 = f"data:{mime};base64,{b64}"
-        logger.info(f"📸 Encoded reference image: {len(image_data)} bytes")
-
-    # 9. Генерируем картинку (ИСПОЛЬЗУЕМ ПЕРЕДАННЫЙ llm)
-    settings = get_llm_settings()
-    image_result = await llm.generate_image(
-        prompt=prompt,
-        image_url=reference_b64,
-        model_override=getattr(settings, 'image_model', None)
-    )
-
-    # 10. Загрузка в ВК с FALLBACK на документы
-    temp_file_path = None
-    generation_status = "error"
-    error_reason = "Unknown error"
-
-    if image_result:
-        try:
-            if image_result["type"] == "url":
-                temp_file_path = Path("/tmp/vk_gen_photo.jpg")
-                async with api.session.get(image_result["value"]) as resp:
-                    resp.raise_for_status()
-                    temp_file_path.write_bytes(await resp.read())
-            else:
-                old_path = Path(image_result["value"])
-                temp_file_path = old_path.with_suffix(".jpg")
-                old_path.rename(temp_file_path)
-
-            try:
-                from PIL import Image
-                with Image.open(temp_file_path) as img:
-                    img = img.convert("RGB")
-                    img.save(temp_file_path, "JPEG", quality=95)
-                logger.info("✅ Image re-saved for VK")
-            except Exception as e:
-                logger.warning(f"⚠️ Pillow re-save failed: {e}")
-
-            attachment_to_send = None
-            try:
-                attachment_to_send = await api.upload_generated_photo(temp_file_path)
-                logger.info("✅ Uploaded as photo")
-            except Exception as photo_err:
-                logger.warning(f"⚠️ Photo upload failed: {photo_err}. Falling back to document...")
-                attachment_to_send = await api.upload_as_document(
-                    temp_file_path,
-                    filename=f"{char_name}_scene.jpg",
-                    peer_id=task.peer_id
-                )
-                logger.info("✅ Uploaded as document (fallback)")
-
-            await api.send_message(
-                peer_id=task.peer_id,
-                text=f"✨ Магия сработала! Вот как {char_name} выглядит в этот момент:",
-                attachment=attachment_to_send
-            )
-
-            if not is_admin:
-                success = await payment_repo.deduct_messages(task.user_id, cost)
-                if success:
-                    logger.info(f"✅ Image sent. Energy ({cost}) safely deducted.")
-                else:
-                    await api.send_message(
-                        peer_id=task.peer_id,
-                        text="😿 Пока я рисовала, у тебя закончилась энергия! Пополни баланс."
-                    )
-
-            generation_status = "success"
-            error_reason = None
-
-        except Exception as vk_err:
-            logger.error(f"❌ Upload failed: {vk_err}")
-            await api.send_message(
-                peer_id=task.peer_id,
-                text="😿 Картинка нарисована, но ВКонтакте капризничает. Попробуй через минуту! Энергия не списана."
-            )
-            error_reason = str(vk_err)
-
-        finally:
-            if temp_file_path and temp_file_path.exists():
-                try:
-                    temp_file_path.unlink()
-                except Exception:
-                    pass
-
-        await gen_repo.update_last_attempt_status(task.user_id, generation_status, error_reason)
-
-    else:
-        await gen_repo.update_last_attempt_status(task.user_id, "error", "Model returned no image")
-        await api.send_message(
-            peer_id=task.peer_id,
-            text=f"😿 Фильтры ВК или нейросети заблокировали запрос! 🛡️\n\nДля полной свободы переходи в Telegram: {telegram_bot_link}"
-        )
-        logger.info("️ Blocked by moderation or API error.")

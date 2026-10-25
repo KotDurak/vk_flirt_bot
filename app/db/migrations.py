@@ -222,5 +222,10 @@ async def run_migrations(db: Database) -> None:
         "BOOLEAN DEFAULT FALSE"
     )
 
+    await _add_column_if_not_exists(
+        conn, "characters", "sd_base_prompt",
+        "TEXT"
+    )
+
     await conn.commit()
     logger.info("Migrations completed successfully. Database is clean and ready.")

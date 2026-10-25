@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # 🆕 ДОБАВЛЯЕМ ЭТО ПОЛЕ: список разрешенных персонажей через запятую
     allowed_chars: str = ""
+    sd_forge_url: str = ""
+    sd_forge_api_key: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="VK_BOT_",
@@ -36,6 +38,9 @@ class Settings(BaseSettings):
             return False
         admin_list = [int(x.strip()) for x in self.admin_ids.split(",")]
         return user_id in admin_list
+
+    def get_ignore_images(self):
+        return set(['barsik'])
 
 
 @lru_cache

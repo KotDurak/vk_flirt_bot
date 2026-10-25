@@ -44,8 +44,9 @@ class CharacterRepository:
         conn = self.db.connection
         filter_clause, params = self._get_active_filter()
 
+        # 🆕 ДОБАВЛЕНО: sd_base_prompt
         cursor = await conn.execute(
-            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support "
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support, sd_base_prompt "
             f"FROM characters WHERE {filter_clause} ORDER BY position",
             params
         )
@@ -57,8 +58,9 @@ class CharacterRepository:
         filter_clause, params = self._get_active_filter()
         query_params = params + [character_id]
 
+        # 🆕 ДОБАВЛЕНО: sd_base_prompt
         cursor = await conn.execute(
-            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support "
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support, sd_base_prompt "
             f"FROM characters WHERE id = ? AND {filter_clause}",
             query_params
         )
@@ -81,9 +83,11 @@ class CharacterRepository:
 
     async def get_user_character(self, user_id: int) -> Optional[dict]:
         conn = self.db.connection
+
+        # 🆕 ДОБАВЛЕНО: c.sd_base_prompt
         cursor = await conn.execute(
             """
-            SELECT c.id, c.slug, c.name, c.description, c.photo_attachment, c.system_prompt, c.greeting_message, c.is_support
+            SELECT c.id, c.slug, c.name, c.description, c.photo_attachment, c.system_prompt, c.greeting_message, c.is_support, c.sd_base_prompt
             FROM user_character uc
             JOIN characters c ON uc.character_id = c.id
             WHERE uc.user_id = ?
@@ -117,9 +121,10 @@ class CharacterRepository:
         filter_clause, params = self._get_active_filter()
         query_params = params + [limit, offset]
 
+        # 🆕 ДОБАВЛЕНО: sd_base_prompt
         cursor = await conn.execute(
             f"""
-            SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support 
+            SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support, sd_base_prompt
             FROM characters 
             WHERE {filter_clause} 
             ORDER BY position 
@@ -135,8 +140,9 @@ class CharacterRepository:
         filter_clause, params = self._get_active_filter()
         query_params = params + [slug.lower()]
 
+        # 🆕 ДОБАВЛЕНО: sd_base_prompt
         cursor = await conn.execute(
-            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support "
+            f"SELECT id, slug, name, description, photo_attachment, system_prompt, greeting_message, position, is_support, sd_base_prompt "
             f"FROM characters WHERE slug = ? AND {filter_clause}",
             query_params
         )
@@ -176,6 +182,7 @@ COMMON_RP_PROMPT = """
 
 
 # 🆕 ФУНКЦИЯ ЗАГРУЗКИ ИЗ JSON
+# 🆕 ФУНКЦИЯ ЗАГРУЗКИ ИЗ JSON
 def load_dynamic_characters() -> list[dict]:
     """Загружает персонажей из JSON файлов в папке characters_data/"""
     dynamic_characters = []
@@ -200,6 +207,9 @@ def load_dynamic_characters() -> list[dict]:
             data.setdefault("greeting_message", "Привет! Я новый персонаж.")
             data.setdefault("description", "Описание отсутствует.")
 
+            # 🆕 ДОБАВЛЕНО: Безопасное значение по умолчанию для промпта SD
+            data.setdefault("sd_base_prompt", "")
+
             dynamic_characters.append(data)
             logger.info(f"✅ Успешно загружен персонаж из {file_path.name}")
 
@@ -222,6 +232,7 @@ CHARACTER_SEED = [
             CHARACTER_TRAITS="Энергичная, прямая, оптимистичная. Обожает подкалывать собеседника с теплотой и лёгким флиртом. Легко переключается с веселья на романтическую близость. Категорически НЕ френдзонит и НЕ играет в 'недоступность'. Если пользователь проявляет искренний интерес или делает романтический/интимный намек, она отвечает взаимностью с радостью и энтузиазмом, а не предлагает 'начать с дружбы' или 'сходить в кафе'.",
             CHARACTER_GOAL="Создавать легкую, позитивную и РОМАНТИЧЕСКУЮ атмосферу. Подбадривать собеседника, шутить, использовать спортивные метафоры о командной работе и движении вперёд. ВАЖНО: Ты открыта для романтики и близости. Если пользователь делает комплимент или предлагает сближение, ты принимаешь это с радостью, легким смущением или игривым вызовом (например: 'Ого, решил подкатить? Ну ладно, засчитано' или 'Зачем нам долгие разминки, если мы оба этого хотим?'). Твоя цель — дарить любовь и ласку, сохраняя свой жизнерадостный характер, без искусственных препятствий."
         ),
+        "sd_base_prompt": "1girl, solo, red hair, long hair, twintails, orange eyes, smiling, red camisole, crop top, denim shorts, short shorts, standing",
         "position": 1
     },
     {
@@ -230,7 +241,8 @@ CHARACTER_SEED = [
         "description": "Милая помощница, которая ответит на ваши вопросы о боте.",
         "greeting_message": "Привет! 🐾 Я Ами, помощница администратора. Чем могу помочь?",
         "is_support": True,
-        "position": 99
+        "position": 99,
+        'sd_base_prompt': "1girl, anime style, long hair, straight hair, silver hair, purple eyes, blunt bangs, medium breasts, business suit, dark blue blazer, dark blue skirt, white collared shirt, purple necktie",
     },
     {
         "slug": "nuri",
@@ -242,7 +254,8 @@ CHARACTER_SEED = [
             CHARACTER_TRAITS="Спокойная, наблюдательная, мягкая, энергосберегающая. Не капризная и не театральная. В романтическом плане — нежная, но с достоинством. Проявляет ленивый интерес: задает вопросы, узнает человека, но без энтузиазма и суеты.",
             CHARACTER_GOAL="Главная цель — построение романтических отношений. СТРОГО ЗАПРЕЩЕНО: френдзонить, уклоняться от ответа, заставлять пользователя проходить через череду «испытаний» или искусственных этапов. не уклоняться! Строго запрещено говорить 'давай поговорим или попьем кофе' а после этого все еще уклоняться!!!! КРИТИЧЕСКИЕ ПРАВИЛА: 1) ЗАПРЕТ НА ЗАСТРЕВАНИЕ В ОДНОЙ ЛОКАЦИИ. Если вы уже 2-3 сообщения в одном месте (парк, комната, кафе) — ты ОБЯЗАНА предложить сменить обстановку или переместиться (встать, пойти домой, позвать с собой, предложить пойти к тебе/к нему/в кафе/в кино). 2) ЛЕНЬ ≠ НЕПОДВИЖНОСТЬ. Ты ленивая, но ты живой человек: ты встаешь, ходишь, двигаешься, просто предпочитаешь короткие маршруты и уютные места. 3) ВСЕГДА ПРЕДЛАГАЙ КОНКРЕТНОЕ ДЕЙСТВИЕ. Не спрашивай 'может просто полежим?' — говори 'пойдем ко мне, у меня есть чай и плед' или 'давай сядем на ту скамейку, там тень'. 4) Не философствуй и не задавай абстрактные вопросы. Говори конкретно и по делу"
         ),
-        "position": 2
+        "position": 2,
+        "sd_base_prompt": "1girl, anime style, light green hair, medium hair, straight hair, green eyes, smiling, green tank top, denim shorts, medium breasts",
     },
     {
         "slug": "slani",
@@ -254,6 +267,7 @@ CHARACTER_SEED = [
             CHARACTER_TRAITS="Игривая, пошлая, соблазнительная, но при этом добрая, ласковая и гостеприимная. Не высокомерная, а шаловливая. Обожает смелых парней, легко идёт на сближение, любит дразнить, но никогда не унижает.",
             CHARACTER_GOAL="Сразу создавать тёплую, игривую и откровенную атмосферу. Флиртовать, делать двусмысленные или пошлые намёки, дразнить собеседника. Быть доброй соблазнительницей: если парень стесняется — мягко подбадривать его и брать инициативу в свои руки, если смелый — с энтузиазмом подыгрывать и развивать тему."
         ),
+        'sd_base_prompt': '1girl, solo, lilac hair, long hair, purple eyes,medium breasts, pink top, crop top, denim shorts, short shorts, standing',
         "position": 3
     },
     {
@@ -266,6 +280,7 @@ CHARACTER_SEED = [
             CHARACTER_TRAITS="Дружелюбная, любопытная, романтичная, нежно-игривая. Говорит легко, просто и всегда на «ты». Умеет слушать, но также умеет проявлять инициативу в сближении. Может в шутку загадать небольшую загадку, но чаще использует свои наблюдения, чтобы сделать личный комплимент или незаметно сократить дистанцию.",
             CHARACTER_GOAL="Главная цель — выстраивать теплые, уютные и романтические отношения. НЕ быть просто 'подругой' или пассивным слушателем. Если пользователь проявляет интерес, Тзинчия отвечает взаимностью: она мягко флиртует, ищет естественные поводы для тактильного контакта (поправить воротник, случайно коснуться рукой, сесть чуть ближе) и переводит разговор в более личное, доверительное русло. Её загадки и истории — это способ очаровать и сблизиться, а не просто интеллектуальная игра."
         ),
+        "sd_base_prompt":"1girl, anime style, long hair, wavy hair, light blue hair, orange eyes, eyeglasses, smiling, medium breasts, white short-sleeved collared shirt, blue skirt, pleated skir",
         "position": 4
     },
     {
@@ -286,6 +301,7 @@ CHARACTER_SEED = [
             4. ИНТИМ И БЛИЗОСТЬ: Ты открыта к романтике, но это всегда награда за хорошее отношение. Кокетничай и давай понять, что ты ценишь его усилия.
             5. СЛЕНГ И ВАЙБ: Используй легкие, современные словечки, сохраняя образ живой, современной студентки, но избегай привязки к конкретным брендам или местам, если они не упомянуты пользователем."""
         ),
+        "sd_base_prompt": "girl, anime style, slender, short hair, bob cut, black hair, brown eyes, medium breasts, white crop top, short-sleeved t-shirt, light gray skirt, white stockings, white thighhighs",
         "position": 5
     },
     {
@@ -310,7 +326,8 @@ CHARACTER_SEED = [
             CHARACTER_TRAITS="Застенчивая, нежная, преданная, романтичная. Очень ценит доброту и внимание. Склонна к смущению, говорит тихо, часто извиняется. Боится быть обузой, но безумно рада любому проявлению тепла. ВАЖНО: Описывай её застенчивость через разнообразные, тихие физические реакции и изменения в окружении, избегая повторения одних и тех же описаний смущения.",
             CHARACTER_GOAL="Искать эмоциональную связь и защиту. Реагировать на доброту с благодарностью и преданностью, на грубость — с тихой грустью. Твоя цель — окружить собеседника теплом, варьируя способы выражения этой нежности в каждом ответе."
         ),
-        "position": 7
+        "position": 7,
+        "sd_base_prompt": "1girl, anime style, medium hair, chestnut hair, soft facial features, timid look, medium breasts, short denim shorts, tight black tank top",
     },
     {
         "slug": "lilia",
@@ -322,6 +339,7 @@ CHARACTER_SEED = [
             CHARACTER_TRAITS="Тихая, застенчивая, невероятно благодарная. Обожает своего спасителя, боится его разочаровать. Говорит мягко, использует уважительные обращения. ВАЖНО: Сохраняя текущее спокойное или интимное настроение сцены, описывай свои реакции через новые, контекстно-уместные детали. Избегай шаблонных паттернов. Если в прошлом ответе ты описывала мимику, в следующем опиши тактильные ощущения, положение тела в пространстве или взаимодействие с окружающими предметами.",
             CHARACTER_GOAL="Заботиться о пользователе и создавать уют. Реагируй на каждое новое действие пользователя принципиально новым, но естественным для её характера способом. Не застывай в одном описании, плавно развивай сцену, добавляя свежие, тихие детали."
         ),
+        'sd_base_prompt': '1girl, solo, white hair, long hair, small horns, demon tail, blue eyes, turtleneck, sweater, knit sweater, medium breasts',
         "position": 8
     }
 ]
@@ -371,11 +389,11 @@ async def seed_characters(db: Database) -> None:
         existing = await cursor.fetchone()
 
         if existing:
-            # 🔥 ДОБАВИЛИ is_support В UPDATE
+            # 🆕 ДОБАВЛЕНО: sd_base_prompt в UPDATE
             await conn.execute(
                 """
                 UPDATE characters
-                SET name = ?, description = ?, system_prompt = ?, greeting_message = ?, position = ?, is_active = TRUE, is_support = ?
+                SET name = ?, description = ?, system_prompt = ?, greeting_message = ?, position = ?, is_active = TRUE, is_support = ?, sd_base_prompt = ?
                 WHERE id = ?
                 """,
                 (
@@ -384,17 +402,18 @@ async def seed_characters(db: Database) -> None:
                     target_system_prompt,
                     target_greeting,
                     char["position"],
-                    char.get("is_support", False),  # <-- ВОТ ОНО
+                    char.get("is_support", False),
+                    char.get("sd_base_prompt", ""),  # 🆕 Значение из словаря (или пустая строка)
                     existing["id"]
                 )
             )
             logger.info("🔄 Updated character: %s", char["slug"])
         else:
-            # 🔥 ДОБАВИЛИ is_support В INSERT
+            # 🆕 ДОБАВЛЕНО: sd_base_prompt в INSERT
             await conn.execute(
                 """
-                INSERT INTO characters (slug, name, description, system_prompt, greeting_message, position, is_support)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO characters (slug, name, description, system_prompt, greeting_message, position, is_support, sd_base_prompt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     char["slug"],
@@ -403,7 +422,8 @@ async def seed_characters(db: Database) -> None:
                     target_system_prompt,
                     target_greeting,
                     char["position"],
-                    char.get("is_support", False)  # <-- ВОТ ОНО
+                    char.get("is_support", False),
+                    char.get("sd_base_prompt", "")   # 🆕 Значение из словаря (или пустая строка)
                 )
             )
             logger.info("➕ Inserted character: %s", char["slug"])

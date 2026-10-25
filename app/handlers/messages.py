@@ -742,7 +742,7 @@ async def handle_update(
                         text="🔄 Перегенерация ответа..."
                     )
                     active_model = user.get("preferred_model") or target_model
-
+                    can_generate_image = current_char['slug'] not in get_settings().get_ignore_images()
                     await chat_queue.add(ChatTask(
                         user_id=user["id"],
                         char_id=current_char["id"],
@@ -750,7 +750,7 @@ async def handle_update(
                         text=last_user_text,
                         user_dict=user,
                         char_dict=current_char,
-                        keyboard=get_regenerate_inline_keyboard(),
+                        keyboard=get_regenerate_inline_keyboard(can_generate_image),
                         is_regeneration=True,
                         model_name=active_model,
                     ))
@@ -767,9 +767,10 @@ async def handle_update(
             is_admin = get_settings().is_admin(int(from_id))
 
             if balance < 15 and not is_admin:
-                answer = f"😿 У тебя не хватает энергии! Нужно 15 , а у тебя {balance}. Пополни баланс!"
+                answer = f"😿 У тебя не хватает энергии! Нужно 5 , а у тебя {balance}. Пополни баланс!"
                 send_keyboard = get_payment_keyboard()
             else:
+                can_generate_image = current_char['slug'] not in get_settings().get_ignore_images()
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=current_char["id"],
@@ -777,7 +778,7 @@ async def handle_update(
                     text="[GENERATE_IMAGE]",
                     user_dict=user,
                     char_dict=current_char,
-                    keyboard=get_regenerate_inline_keyboard(),
+                    keyboard=get_regenerate_inline_keyboard(can_generate_image),
                     is_image_generation=True
                 ))
                 return
@@ -934,7 +935,7 @@ async def handle_update(
 
                 await api.send_message(peer_id=int(peer_id), text="⏳")
                 active_model = user.get("preferred_model") or target_model
-
+                can_generate_image = current_char['slug'] not in get_settings().get_ignore_images()
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=current_char["id"],
@@ -942,7 +943,7 @@ async def handle_update(
                     text="[СИСТЕМНАЯ КОМАНДА: Сгенерируй САМОЕ ПЕРВОЕ сообщение диалога. Обстановка: простая и повседневная. Ты занята своими делами. Реакция: холодная, ленивая, с легким скепсисом. Формат: 1-2 коротких абзаца, действия в *звездочках*, речь с тире.]",
                     user_dict=user,
                     char_dict=current_char,
-                    keyboard=get_regenerate_inline_keyboard(),
+                    keyboard=get_regenerate_inline_keyboard(can_generate_image),
                     model_name=active_model
                 ))
                 return
@@ -984,7 +985,7 @@ async def handle_update(
 
                 char_id = current_char["id"]
                 await msg_repo.add_message(user["id"], char_id, "user", text)
-
+                can_generate_image = current_char['slug'] not in get_settings().get_ignore_images()
                 await chat_queue.add(ChatTask(
                     user_id=user["id"],
                     char_id=char_id,
@@ -992,7 +993,7 @@ async def handle_update(
                     text=text,
                     user_dict=user,
                     char_dict=current_char,
-                    keyboard=get_regenerate_inline_keyboard(),
+                    keyboard=get_regenerate_inline_keyboard(can_generate_image),
                     model_name=active_model,
                     photo_url=photo_url
                 ))
