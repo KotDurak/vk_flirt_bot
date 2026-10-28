@@ -766,7 +766,7 @@ async def handle_update(
             balance = await payment_repo.get_user_balance(user["id"])
             is_admin = get_settings().is_admin(int(from_id))
 
-            if balance < 15 and not is_admin:
+            if balance < 5 and not is_admin:
                 answer = f"😿 У тебя не хватает энергии! Нужно 5 , а у тебя {balance}. Пополни баланс!"
                 send_keyboard = get_payment_keyboard()
             else:
