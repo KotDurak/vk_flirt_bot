@@ -64,35 +64,17 @@ class MessageRepository:
             self,
             user_id: int,
             character_id: int,
-            from_message_id: int,
-            keep_last: int = 10
+            from_message_id: int
     ) -> List[Dict]:
-        """
-        Возвращает сообщения для генерации summary:
-        от from_message_id до (последнее - keep_last).
-        """
+        """Возвращает ВСЕ сообщения после from_message_id для генерации summary."""
         conn = self.db.connection
         cursor = await conn.execute(
             """
-            SELECT id FROM messages
-            WHERE user_id = ? AND character_id = ?
-            ORDER BY id DESC LIMIT 1 OFFSET ?
-            """,
-            (user_id, character_id, keep_last)
-        )
-        boundary_row = await cursor.fetchone()
-        if not boundary_row:
-            return []
-
-        boundary_id = boundary_row["id"]
-
-        cursor = await conn.execute(
-            """
             SELECT id, role, content FROM messages
-            WHERE user_id = ? AND character_id = ? AND id > ? AND id <= ?
+            WHERE user_id = ? AND character_id = ? AND id > ?
             ORDER BY id ASC
             """,
-            (user_id, character_id, from_message_id, boundary_id)
+            (user_id, character_id, from_message_id)
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
