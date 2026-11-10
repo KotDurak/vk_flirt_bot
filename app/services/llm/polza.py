@@ -81,7 +81,14 @@ class LLMPolza(LLMBase):
             # Если Polza их не поддерживает, она их просто проигнорирует без ошибки.
             "frequency_penalty": 0.1,
             "presence_penalty": 0.05,
-            "stop": ["User:", "Пользователь:", "[СИСТЕМА", "[SYSTEM"],
+             "stop": [
+                "system:", "<think>", "</think>", "<reasoning>"
+            ],
+            "reasoning": {
+                "enabled": False,  # Жестко выключаем режим рассуждений
+                "effort": "none",  # Уровень усилий: нулевой
+                "exclude": True  # На всякий пожарный: если модель всё же подумает, не включай это в ответ
+            }
         }
 
         for attempt in range(max_retries):

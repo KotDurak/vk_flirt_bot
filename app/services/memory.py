@@ -13,45 +13,42 @@ from app.config import get_llm_settings
 logger = logging.getLogger(__name__)
 
 # === НАСТРОЙКИ ПАМЯТИ ===
-SUMMARY_TRIGGER = 20          # Суммаризируем, когда накапливается 20 новых сообщений
-HISTORY_WINDOW = 20           # Последние живые сообщения для контекста
+SUMMARY_TRIGGER = 20  # Суммаризируем, когда накапливается 20 новых сообщений
+HISTORY_WINDOW = 20  # Последние живые сообщения для контекста
 
 SUMMARY_SYSTEM_PROMPT = """
-Ты — Хранитель Памяти (Лор-мастер). Твоя задача — поддерживать актуальное, подробное, но сжатое резюме диалога.
+Ты — Хранитель Памяти. Задача — сжатое, актуальное резюме диалога.
 
 ЖЁСТКИЕ ПРАВИЛА:
-1. СТРУКТУРА: Используй блоки [CORE_FACTS] (фундамент) и [CURRENT_STATE] (текущий момент).
-2. БЕЗ ИМЕН В РЕЗЮМЕ: В тексте резюме НЕ используй имена. Используй «Персонаж» и «Пользователь» (или опускай подлежащее). Имена уже зашиты в системном промпте.
-3. ОБНОВЛЯЙ, А НЕ ДОПИСЫВАЙ (КРИТИЧНО!): Если статус отношений, локация или состояние изменились — ЗАМЕНИ старый текст на новый. Не оставляй в тексте историю изменений. Пиши только актуальное состояние.
-4. СОХРАНЯЙ ДЕТАЛИ ЛОРА: Внешность, черты характера, манера физической близости — это важно для отыгрыша. Оставляй их в [CORE_FACTS], но формулируй тезисно, убирая "воду" и повторы.
-5. ЛИМИТ: Общий объем резюме строго 600-800 слов. Если новые детали не влезают, безжалостно сжимай старые описания, но не теряй суть.
+1. СТРУКТУРА: Строго блоки [CORE_FACTS] и [CURRENT_STATE].
+2. ИМЕНА (КРИТИЧНО): ОБЯЗАТЕЛЬНО используй реальное имя Пользователя (например, "Максим") в тексте. Для героини пиши "Персонаж".
+3. ОБНОВЛЯЙ, НЕ ДОПИСЫВАЙ: Если статус/локация изменились — ЗАМЕНИ старый текст новым. Историю изменений не веди.
+4. НЕ ДУБЛИРУЙ АНКЕТУ (КРИТИЧНО ДЛЯ БЮДЖЕТА): В блоке "ПЕРСОНАЖ" пиши ТОЛЬКО то, что выявилось в диалоге и чего НЕТ в базовой карточке персонажа. Статичный лор НЕ ПЕРЕЧИСЛЯЙ. Если нового ничего нет — пиши "—".
+5. ЗАПРЕТ НА РАССУЖДЕНИЯ: Категорически запрещено выводить процесс мышления, теги <think> или анализ задачи. Пиши только финальный результат.
+6. ЛИМИТ: Строго 250–350 слов. Сжимай безжалостно.
 
-ФОРМАТ СТРОГО:
-
+ФОРМАТ:
 [CORE_FACTS]
-- ОТНОШЕНИЯ: [Текущий статус в 1-2 предложениях. Напр: Официально встречаются. Персонаж доминирует, Пользователь влюблен и подчиняется.]
-- ПЕРСОНАЖ (ЛОР): [Внешность, ключевые черты характера, стиль общения. Тезисно. Напр: Дерзкая скейтерша, платиновые волосы, пирсинг, хриплый голос. Любит подкалывать, требует действий, а не слов.]
-- СТИЛЬ ВЗАИМОДЕЙСТВИЯ: [Как они взаимодействуют физически и эмоционально. Напр: Персонаж инициирует жесткий флирт, кусается, прижимает к себе. Пользователь нежен и готов подчиняться.]
-- ПОЛЬЗОВАТЕЛЬ: [Ключевые черты. Напр: Влюблен, не умеет кататься на скейте, но старается ради Персонажа.]
+- ОТНОШЕНИЯ: [1–2 предложения. Текущий статус.]
+- ПЕРСОНАЖ (НОВОЕ В ЛОРЕ): [ТОЛЬКО факты, которых нет в анкете. Если ничего — "—".]
+- СТИЛЬ ВЗАИМОДЕЙСТВИЯ: [Как взаимодействуют СЕЙЧАС. 1–2 предложения.]
+- ПОЛЬЗОВАТЕЛЬ: [Имя Пользователя + ключевые черты и текущее состояние. 1–2 предложения.]
 
 [CURRENT_STATE]
-- МЕСТО: [Где они находятся прямо сейчас]
-- СОСТОЯНИЕ: [Текущие эмоции и атмосфера сцены]
-- МИКРО-ФАКТЫ: [Что произошло в последних сообщениях. Только самое свежее! 3-4 тезиса.]
-
-ПРИМЕР ПРАВИЛЬНОГО ОБНОВЛЕНИЯ:
-Если в старом резюме было "Они флиртуют у моста", а в новых сообщениях они поцеловались и пошли за едой, ты НЕ пишешь: "Они флиртовали, потом поцеловались и пошли за едой".
-Ты пишешь в [CURRENT_STATE]: "- МЕСТО: Путь к киоску с едой. - МИКРО-ФАКТЫ: После поцелуя Персонаж повел Пользователя за едой.
+- МЕСТО: [Где находятся]
+- СОСТОЯНИЕ: [Эмоции и атмосфера]
+- МИКРО-ФАКТЫ: [2–3 свежих тезиса о последних сообщениях]
 """
 
+
 async def maybe_generate_summary(
-    session,
-    llm: LLMBase,
-    msg_repo: MessageRepository,
-    summary_repo: SummaryRepository,
-    user_id: int,
-    character_id: int,
-    model_override: str | None = None
+        session,
+        llm: LLMBase,
+        msg_repo: MessageRepository,
+        summary_repo: SummaryRepository,
+        user_id: int,
+        character_id: int,
+        model_override: str | None = None
 ) -> None:
     current_summary = await summary_repo.get_summary(user_id, character_id)
     last_summarized_id = current_summary["last_summarized_message_id"] if current_summary else 0
@@ -80,8 +77,10 @@ async def maybe_generate_summary(
 
     summary_settings = copy.deepcopy(get_llm_settings())
     summary_settings.model = model_override if model_override else summary_settings.model_summary
-    summary_settings.max_tokens = 4096
-    # Немного понижаем temperature для суммаризации, чтобы она была более детерминированной и меньше "фантазировала"
+
+    # FIX 1: Безопасный потолок. 350 слов = ~600 токенов. 2000 хватит с запасом, чтобы закончить формат,
+    # но физически не даст улететь в 14 000 токенов в случае сбоя логики модели.
+    summary_settings.max_tokens = 2000
     summary_settings.temperature = 0.2
 
     summary_llm = create_llm_client(session)
@@ -93,9 +92,23 @@ async def maybe_generate_summary(
 
     new_summary = result.content.strip()
 
+    # FIX 2: Безжалостная очистка от мусора и reasoning-тегов
+    # 1. Вырезаем всё внутри тегов <think>...</think>
+    new_summary = re.sub(r'<think>.*?</think>', '', new_summary, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # 2. Если модель всё равно написала что-то до [CORE_FACTS], отрезаем всё до этого момента
+    if "[CORE_FACTS]" in new_summary.upper():
+        new_summary = new_summary[new_summary.upper().find("[CORE_FACTS]"):]
+
     # Валидация: проверяем наличие обоих критических заголовков
     if "[CORE_FACTS]" not in new_summary.upper() or "[CURRENT_STATE]" not in new_summary.upper():
         logger.warning("⚠️ Summary rejected: missing required sections [CORE_FACTS] or [CURRENT_STATE]")
+        return
+
+    # FIX 3: Проверка на перевес (защита от runaway генерации)
+    # 2500 символов = ~400-450 слов. Если больше - модель проигнорировала лимит, мы не сохраняем этот мусор.
+    if len(new_summary) > 2500:
+        logger.warning(f"⚠️ Summary rejected: too long ({len(new_summary)} chars). Model ignored length limit.")
         return
 
     cyrillic_chars = len(re.findall(r'[а-яА-ЯёЁ]', new_summary))
@@ -105,7 +118,7 @@ async def maybe_generate_summary(
 
     last_message_id = messages_for_summary[-1]["id"]
     await summary_repo.save_summary(user_id, character_id, new_summary, last_message_id)
-    logger.info(f"✅ Summary saved up to message {last_message_id}")
+    logger.info(f"✅ Summary saved up to message {last_message_id} (Length: {len(new_summary)} chars)")
 
 
 async def build_llm_context(
@@ -114,7 +127,7 @@ async def build_llm_context(
         user_id: int,
         character_id: int,
         system_prompt: str,
-        current_user_input: str | None = None  # <-- ДОБАВЛЕНО: явный триггер текущего действия
+        current_user_input: str | None = None
 ) -> list[dict]:
     system_content = system_prompt
 
@@ -131,14 +144,11 @@ async def build_llm_context(
 
     messages = [{"role": "system", "content": system_content}]
 
-    # 2. 🔥 FIX: БЕРЕМ АБСОЛЮТНО ПОСЛЕДНИЕ СООБЩЕНИЯ.
-    # Убираем after_message_id, чтобы не обрезать живой контекст.
-    # Нам нужны последние 20 сообщений ВООБЩЕ, а не "после саммари".
+    # 2. БЕРЕМ АБСОЛЮТНО ПОСЛЕДНИЕ СООБЩЕНИЯ.
     history = await msg_repo.get_recent_history(
         user_id,
         character_id,
         limit=HISTORY_WINDOW
-        # after_message_id УДАЛЕН
     )
 
     # 3. Дедупликация (защита от дублей)
@@ -154,9 +164,7 @@ async def build_llm_context(
 
     messages.extend(deduplicated)
 
-    # 4. 🔥 SUPER FIX: Явный "Якорь текущего действия"
-    # Если мы генерируем ответ на новое сообщение, добавляем его в самый конец
-    # отдельным блоком, чтобы механизм Attention модели сфокусировался на нем на 100%.
+    # 4. Явный "Якорь текущего действия"
     if current_user_input:
         messages.append({
             "role": "user",
