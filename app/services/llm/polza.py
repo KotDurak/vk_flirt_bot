@@ -88,6 +88,11 @@ class LLMPolza(LLMBase):
                 "enabled": False,  # Жестко выключаем режим рассуждений
                 "effort": "none",  # Уровень усилий: нулевой
                 "exclude": True  # На всякий пожарный: если модель всё же подумает, не включай это в ответ
+            },
+            "provider": {
+                "order": ["GMICloud", "DeepInfra"],
+                "sort": "price",
+                "allow_fallbacks": True,
             }
         }
 
